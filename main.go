@@ -3,14 +3,17 @@ package main
 import (
 	"bufio"
 	"context"
+	"database/sql"
 	"flag"
 	"fmt"
 	"io"
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/pkg/errors"
+	"k8s.io/apimachinery/pkg/util/wait"
 
 	"github.com/aws/aws-sdk-go-v2/config"
 
@@ -25,6 +28,8 @@ import (
 	log "github.com/sirupsen/logrus"
 
 	"github.com/phayes/freeport"
+
+	_ "github.com/lib/pq"
 )
 
 type dbCredential struct {
@@ -49,11 +54,17 @@ type dbService struct {
 	Address             nat.PortBinding
 }
 
+func (ds *dbService) ConnectionString(cred *dbCredential) string {
+	return fmt.Sprintf("host=%s port=%s user=%s "+
+		"password=%s dbname=%s sslmode=disable",
+		ds.Address.HostIP, ds.Address.HostPort, cred.username, cred.password, "introspector")
+}
+
 type introspectorService struct {
 	containerService
 }
 
-func (is *introspectorService) runIntrospectorCommand(ctx context.Context, dockerClient *client.Client, args []string, env []string) error {
+func (is *introspectorService) runCommand(ctx context.Context, dockerClient *client.Client, args []string, env []string) error {
 	envVars := []string{}
 	if env != nil {
 		envVars = append(envVars, env...)
@@ -120,7 +131,7 @@ func getDockerClient() (*client.Client, error) {
 
 const postgresRef = "supabase/postgres:0.13.0"
 const postgresPort = 5432
-const introspectorRef = "goldfig/introspector:latest"
+const introspectorRef = "goldfig/lighthouse:latest"
 
 func requireDockerImage(ctx context.Context, client *client.Client, ref string) error {
 	images, err := client.ImageList(ctx, types.ImageListOptions{
@@ -194,6 +205,11 @@ func createPostgresContainer(ctx context.Context, suCredential *dbCredential, do
 		ExposedPorts: exposedPorts,
 		Labels:       labels,
 		Env:          envVars,
+		Healthcheck: &container.HealthConfig{
+			Test:    []string{"CMD", "pg_isready"},
+			Timeout: 5 * time.Second,
+			Retries: 3,
+		},
 	}, &container.HostConfig{
 		PortBindings: portBindings,
 		Mounts: []mount.Mount{
@@ -230,6 +246,17 @@ func runPostgres(ctx context.Context, dockerClient *client.Client, suCredential 
 	err = dockerClient.ContainerStart(ctx, service.ContainerID, types.ContainerStartOptions{})
 	if err != nil {
 		return nil, err
+	}
+	err = wait.PollImmediate(2*time.Second, 60*time.Second, func() (bool, error) {
+		resp, err := dockerClient.ContainerInspect(ctx, service.ContainerID)
+		if err != nil {
+			return false, err
+		}
+		log.Infof("health: %v", resp.State.Health.Status)
+		return resp.State.Health.Status == "healthy", nil
+	})
+	if err != nil {
+		return nil, errors.Wrap(err, "Postgres did not become healthy before timeout")
 	}
 	return service, nil
 }
@@ -323,13 +350,49 @@ func loadAwsCredentials(ctx context.Context) ([]string, error) {
 	return env, nil
 }
 
-func runSecurityGroupTool(dbCredential *dbCredential) {
+func installDbFunction(db *sql.DB) error {
+	const isRFC1918 = `CREATE OR REPLACE FUNCTION is_rfc1918block(block cidr)
+	RETURNS boolean
+	LANGUAGE plpgsql
+	AS
+	$$
+	BEGIN
+		RETURN
+			('192.168.0.0/16' >>= block)
+			OR ('172.16.0.0/12' >>= block)
+			OR ('10.0.0.0/8' >>= block);
+	END;
+	$$`
 
+	result, err := db.Exec(isRFC1918)
+	if err != nil {
+		return err
+	}
+	log.Infof("result %v", result)
+	return nil
+}
+
+func runSecurityGroupTool(pgInfo string) (interface{}, error) {
+	db, err := sql.Open("postgres", pgInfo)
+	if err != nil {
+		return nil, errors.Wrap(err, "Failed to connect to db")
+	}
+	err = db.Ping()
+	if err != nil {
+		return nil, errors.Wrap(err, "Failed to ping db")
+	}
+	log.Info("db ready")
+	err = installDbFunction(db)
+	if err != nil {
+		return nil, errors.Wrap(err, "Failed to install fixture functions")
+	}
+	return nil, nil
 }
 
 func main() {
 	var skipIntrospector bool
 	flag.BoolVar(&skipIntrospector, "skip-introspector", false, "Skip running an import, use existing data")
+	flag.Parse()
 
 	ctx := context.Background()
 	dockerClient, err := getDockerClient()
@@ -340,20 +403,20 @@ func main() {
 		username: "introspector",
 		password: "introspector",
 	}
+	superuser := &dbCredential{
+		username: "postgres",
+		password: "postgres",
+	}
+	postgresService, err := runPostgres(ctx, dockerClient, superuser)
+	if err != nil {
+		panic(err)
+	}
 	if !skipIntrospector {
-		superuser := &dbCredential{
-			username: "postgres",
-			password: "postgres",
-		}
-		postgresService, err := runPostgres(ctx, dockerClient, superuser)
-		if err != nil {
-			panic(err)
-		}
 		introspectorService, err := runIntrospector(ctx, dockerClient, postgresService)
 		if err != nil {
 			panic(err)
 		}
-		err = introspectorService.runIntrospectorCommand(ctx, dockerClient, []string{"init"}, nil)
+		err = introspectorService.runCommand(ctx, dockerClient, []string{"init"}, nil)
 		if err != nil {
 			panic(err)
 		}
@@ -361,7 +424,7 @@ func main() {
 		if err != nil {
 			panic(err)
 		}
-		err = introspectorService.runIntrospectorCommand(ctx,
+		err = introspectorService.runCommand(ctx,
 			dockerClient, []string{"account", "aws", "import", "--force", "--service", "ec2=SecurityGroups,NetworkInterfaces"}, awsCreds)
 		if err != nil {
 			panic(err)
@@ -370,10 +433,13 @@ func main() {
 		if err != nil {
 			panic(err)
 		}
-		runSecurityGroupTool(importer)
-		/*err = postgresService.ShutDown(ctx, dockerClient)
-		if err != nil {
-			panic(err)
-		}*/
 	}
+	_, err = runSecurityGroupTool(postgresService.ConnectionString(importer))
+	if err != nil {
+		panic(err)
+	}
+	/*err = postgresService.ShutDown(ctx, dockerClient)
+	if err != nil {
+		panic(err)
+	}*/
 }
