@@ -3,6 +3,8 @@ module goldfiglabs.com/sgtool
 go 1.15
 
 require (
+	github.com/aws/aws-sdk-go-v2 v1.2.0 // indirect
+	github.com/aws/aws-sdk-go-v2/config v1.1.1 // indirect
 	github.com/containerd/containerd v1.4.3 // indirect
 	github.com/docker/distribution v2.7.1+incompatible // indirect
 	github.com/docker/docker v20.10.3+incompatible

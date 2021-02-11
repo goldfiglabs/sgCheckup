@@ -1,19 +1,26 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"flag"
+	"fmt"
 	"io"
+	"os"
 	"strconv"
 	"strings"
 
 	"github.com/pkg/errors"
 
+	"github.com/aws/aws-sdk-go-v2/config"
+
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/filters"
+	"github.com/docker/docker/api/types/mount"
 	"github.com/docker/docker/api/types/network"
 	"github.com/docker/docker/client"
+	"github.com/docker/docker/pkg/stdcopy"
 	"github.com/docker/go-connections/nat"
 	log "github.com/sirupsen/logrus"
 
@@ -28,9 +35,79 @@ type dbCredential struct {
 type dbInfo struct {
 	superuser *dbCredential
 	importer  *dbCredential
-	reader    *dbCredential
 	// hostname string
 	// port int
+}
+
+type containerService struct {
+	ContainerID string
+}
+
+type dbService struct {
+	containerService
+	SuperUserCredential *dbCredential
+	Address             nat.PortBinding
+}
+
+type introspectorService struct {
+	containerService
+}
+
+func (is *introspectorService) runIntrospectorCommand(ctx context.Context, dockerClient *client.Client, args []string, env []string) error {
+	envVars := []string{}
+	if env != nil {
+		envVars = append(envVars, env...)
+	}
+	cmdPrefix := []string{"python", "introspector.py"}
+	cmd := append(cmdPrefix, args...)
+	execResp, err := dockerClient.ContainerExecCreate(ctx, is.ContainerID, types.ExecConfig{
+		Cmd:          cmd,
+		AttachStderr: true,
+		AttachStdout: true,
+		AttachStdin:  true,
+		Env:          envVars,
+	})
+	if err != nil {
+		return errors.Wrap(err, "Failed to create exec")
+	}
+	resp, err := dockerClient.ContainerExecAttach(ctx, execResp.ID, types.ExecStartCheck{})
+	if err != nil {
+		return errors.Wrap(err, "Failed to attach to exec")
+	}
+	defer resp.Close()
+
+	// read the output
+	outputDone := make(chan error)
+	go func() {
+		// StdCopy demultiplexes the stream into two buffers
+		_, err = stdcopy.StdCopy(os.Stdout, os.Stderr, resp.Reader)
+		outputDone <- err
+	}()
+
+	stdin := bufio.NewScanner(os.Stdin)
+	go func() {
+		for stdin.Scan() {
+			resp.Conn.Write(stdin.Bytes())
+			resp.Conn.Write([]byte("\n"))
+		}
+	}()
+
+	select {
+	case err := <-outputDone:
+		if err != nil {
+			return err
+		}
+		break
+
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+
+	return nil
+}
+
+func (cs *containerService) ShutDown(ctx context.Context, dockerClient *client.Client) error {
+	return stopAndRemoveContainer(ctx, dockerClient, cs.ContainerID)
 }
 
 func getDockerClient() (*client.Client, error) {
@@ -43,6 +120,7 @@ func getDockerClient() (*client.Client, error) {
 
 const postgresRef = "supabase/postgres:0.13.0"
 const postgresPort = 5432
+const introspectorRef = "goldfig/introspector:latest"
 
 func requireDockerImage(ctx context.Context, client *client.Client, ref string) error {
 	images, err := client.ImageList(ctx, types.ImageListOptions{
@@ -69,13 +147,9 @@ func requireDockerImage(ctx context.Context, client *client.Client, ref string) 
 }
 
 const postgresContainerName = "sgCheckup-db"
+const introspectorContainerName = "sgCheckup-introspector"
 
-type dbContainerInfo struct {
-	ID      string
-	address nat.PortBinding
-}
-
-func createPostgresContainer(ctx context.Context, dbInfo *dbInfo, dockerClient *client.Client) (*dbContainerInfo, error) {
+func createPostgresContainer(ctx context.Context, suCredential *dbCredential, dockerClient *client.Client) (*dbService, error) {
 	existingContainers, err := dockerClient.ContainerList(ctx, types.ContainerListOptions{
 		Filters: filters.NewArgs(filters.Arg("name", "/"+postgresContainerName)),
 		All:     true,
@@ -85,9 +159,7 @@ func createPostgresContainer(ctx context.Context, dbInfo *dbInfo, dockerClient *
 	}
 	if len(existingContainers) == 1 {
 		container := existingContainers[0]
-		err = dockerClient.ContainerRemove(ctx, container.ID, types.ContainerRemoveOptions{
-			RemoveVolumes: false,
-		})
+		err = stopAndRemoveContainer(ctx, dockerClient, container.ID)
 		if err != nil {
 			return nil, errors.Wrap(err, "Failed to remove existing container")
 		}
@@ -113,67 +185,145 @@ func createPostgresContainer(ctx context.Context, dbInfo *dbInfo, dockerClient *
 
 	labels := map[string]string{"sgCheckup": "db"}
 
-	envVars := []string{"POSTGRES_DB=postgres", "POSTGRES_USER=postgres", "POSTGRES_PASSWORD=postgres"}
-	volumes := map[string]struct{}{"pg_data:/var/lib/postgresql/data": {}}
+	envVars := []string{"POSTGRES_DB=postgres",
+		fmt.Sprintf("POSTGRES_USER=%v", suCredential.username),
+		fmt.Sprintf("POSTGRES_PASSWORD=%v", suCredential.password),
+	}
 	containerBody, err := dockerClient.ContainerCreate(ctx, &container.Config{
 		Image:        postgresRef,
 		ExposedPorts: exposedPorts,
 		Labels:       labels,
-		Volumes:      volumes,
 		Env:          envVars,
 	}, &container.HostConfig{
 		PortBindings: portBindings,
-	}, &network.NetworkingConfig{}, nil, "sgCheckup-db")
+		Mounts: []mount.Mount{
+			{
+				Type:   "volume",
+				Source: "sg_checkup_pg_data",
+				Target: "/var/lib/postgresql/data",
+			},
+		},
+	}, &network.NetworkingConfig{}, nil, postgresContainerName)
 
 	if err != nil {
 		return nil, errors.Wrap(err, "Failed to create container")
 	}
-	log.Infof("container id %v", containerBody.ID)
-	return &dbContainerInfo{
-		ID:      containerBody.ID,
-		address: hostAddress,
+	log.Infof("postgres container id %v", containerBody.ID)
+	return &dbService{
+		containerService:    containerService{ContainerID: containerBody.ID},
+		SuperUserCredential: suCredential,
+		Address:             hostAddress,
 	}, nil
 }
 
-func runPostgres(ctx context.Context, dbInfo *dbInfo, dockerClient *client.Client) (*dbContainerInfo, error) {
+func runPostgres(ctx context.Context, dockerClient *client.Client, suCredential *dbCredential) (*dbService, error) {
+	log.Info("Running postgres")
 	err := requireDockerImage(ctx, dockerClient, postgresRef)
 	if err != nil {
 		return nil, err
 	}
 
-	container, err := createPostgresContainer(ctx, dbInfo, dockerClient)
+	service, err := createPostgresContainer(ctx, suCredential, dockerClient)
 	if err != nil {
 		return nil, err
 	}
-	err = dockerClient.ContainerStart(ctx, container.ID, types.ContainerStartOptions{})
+	err = dockerClient.ContainerStart(ctx, service.ContainerID, types.ContainerStartOptions{})
 	if err != nil {
 		return nil, err
 	}
-	return container, nil
+	return service, nil
 }
 
-func stopPostgres(ctx context.Context, dockerClient *client.Client, container *dbContainerInfo) {
-	dockerClient.ContainerRemove(ctx, container.ID, types.ContainerRemoveOptions{
+func stopAndRemoveContainer(ctx context.Context, dockerClient *client.Client, containerID string) error {
+	err := dockerClient.ContainerStop(ctx, containerID, nil)
+	if err != nil {
+		errors.WithMessage(err, "Failed to stop container")
+	}
+	err = dockerClient.ContainerRemove(ctx, containerID, types.ContainerRemoveOptions{
 		RemoveVolumes: false,
 	})
-}
-
-func runIntrospector(dbInfo *dbInfo) error {
-	ctx := context.Background()
-	log.Info("Running introspector")
-	dockerClient, err := getDockerClient()
 	if err != nil {
-		return errors.Wrap(err, "Failed to get docker client. Is it installed?")
+		return errors.WithMessage(err, "Failed to remove container")
 	}
-	postgresContainer, err := runPostgres(ctx, dbInfo, dockerClient)
-	if err != nil {
-		return errors.Wrap(err, "Failed to start postgres container")
-	}
-
 	return nil
 }
 
-func runSecurityGroupTool() {
+func createIntrospectorContainer(ctx context.Context, dockerClient *client.Client, postgresService *dbService) (*introspectorService, error) {
+	existingContainers, err := dockerClient.ContainerList(ctx, types.ContainerListOptions{
+		Filters: filters.NewArgs(filters.Arg("name", "/"+introspectorContainerName)),
+		All:     true,
+	})
+	if err != nil {
+		return nil, errors.Wrap(err, "Failed to list existing containers")
+	}
+	if len(existingContainers) == 1 {
+		container := existingContainers[0]
+		err = stopAndRemoveContainer(ctx, dockerClient, container.ID)
+		if err != nil {
+			return nil, errors.Wrap(err, "Failed to remove existing container")
+		}
+	}
+
+	envVars := []string{
+		fmt.Sprintf("INTROSPECTOR_SU_DB_USER=%v", postgresService.SuperUserCredential.username),
+		fmt.Sprintf("INTROSPECTOR_SU_DB_PASSWORD=%v", postgresService.SuperUserCredential.password),
+		fmt.Sprintf("INTROSPECTOR_DB_HOST=%v", postgresService.Address.HostIP),
+		fmt.Sprintf("INTROSPECTOR_DB_PORT=%v", postgresService.Address.HostPort),
+	}
+	log.Infof("Using environment %v", envVars)
+	containerBody, err := dockerClient.ContainerCreate(ctx, &container.Config{
+		Image:  introspectorRef,
+		Labels: map[string]string{"sgCheckup": "introspector"},
+		Env:    envVars,
+	}, &container.HostConfig{
+		NetworkMode: "host",
+	}, &network.NetworkingConfig{}, nil, introspectorContainerName)
+	if err != nil {
+		return nil, errors.Wrap(err, "Failed to create container")
+	}
+	log.Infof("introspector container ID %v", containerBody.ID)
+	return &introspectorService{
+		containerService{containerBody.ID},
+	}, nil
+}
+
+func runIntrospector(ctx context.Context, dockerClient *client.Client, postgresService *dbService) (*introspectorService, error) {
+	log.Info("Checking for introspector image")
+	err := requireDockerImage(ctx, dockerClient, "lighthouse:latest")
+	if err != nil {
+		return nil, errors.Wrap(err, "Failed to get instrospector docker image")
+	}
+	service, err := createIntrospectorContainer(ctx, dockerClient, postgresService)
+	if err != nil {
+		return nil, err
+	}
+	err = dockerClient.ContainerStart(ctx, service.ContainerID, types.ContainerStartOptions{})
+	if err != nil {
+		return nil, errors.Wrap(err, "Failed to start introspector")
+	}
+	return service, nil
+}
+
+func loadAwsCredentials(ctx context.Context) ([]string, error) {
+	cfg, err := config.LoadDefaultConfig(ctx)
+	if err != nil {
+		return nil, err
+	}
+	creds, err := cfg.Credentials.Retrieve(ctx)
+	if err != nil {
+		return nil, err
+	}
+	env := []string{
+		fmt.Sprintf("AWS_ACCESS_KEY_ID=%v", creds.AccessKeyID),
+		fmt.Sprintf("AWS_SECRET_ACCESS_KEY=%v", creds.SecretAccessKey),
+	}
+	if len(creds.SessionToken) > 0 {
+		env = append(env, fmt.Sprintf("AWS_SESSION_TOKEN=%v", creds.SessionToken))
+	}
+	return env, nil
+}
+
+func runSecurityGroupTool(dbCredential *dbCredential) {
 
 }
 
@@ -181,20 +331,49 @@ func main() {
 	var skipIntrospector bool
 	flag.BoolVar(&skipIntrospector, "skip-introspector", false, "Skip running an import, use existing data")
 
+	ctx := context.Background()
+	dockerClient, err := getDockerClient()
+	if err != nil {
+		panic(errors.Wrap(err, "Failed to get docker client. Is it installed?"))
+	}
+	importer := &dbCredential{
+		username: "introspector",
+		password: "introspector",
+	}
 	if !skipIntrospector {
-		runIntrospector(&dbInfo{
-			superuser: &dbCredential{
-				username: "postgres",
-				password: "postgres",
-			},
-			importer: &dbCredential{
-				username: "introspector",
-				password: "introspector",
-			},
-			reader: &dbCredential{
-				username: "introspector_scoped",
-				password: "introspector_scoped",
-			},
-		})
+		superuser := &dbCredential{
+			username: "postgres",
+			password: "postgres",
+		}
+		postgresService, err := runPostgres(ctx, dockerClient, superuser)
+		if err != nil {
+			panic(err)
+		}
+		introspectorService, err := runIntrospector(ctx, dockerClient, postgresService)
+		if err != nil {
+			panic(err)
+		}
+		err = introspectorService.runIntrospectorCommand(ctx, dockerClient, []string{"init"}, nil)
+		if err != nil {
+			panic(err)
+		}
+		awsCreds, err := loadAwsCredentials(ctx)
+		if err != nil {
+			panic(err)
+		}
+		err = introspectorService.runIntrospectorCommand(ctx,
+			dockerClient, []string{"account", "aws", "import", "--force", "--service", "ec2=SecurityGroups,NetworkInterfaces"}, awsCreds)
+		if err != nil {
+			panic(err)
+		}
+		err = introspectorService.ShutDown(ctx, dockerClient)
+		if err != nil {
+			panic(err)
+		}
+		runSecurityGroupTool(importer)
+		/*err = postgresService.ShutDown(ctx, dockerClient)
+		if err != nil {
+			panic(err)
+		}*/
 	}
 }
