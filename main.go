@@ -498,6 +498,13 @@ type securityGroupRow struct {
 }
 
 func (r *securityGroupRow) isProblematic() bool {
+	if r.largeRangeCount {
+		return true
+	}
+	if r.isLargePublicBlock {
+		return true
+	}
+	fmt.Printf("port ranges %v\n", r.portRanges)
 	return false
 }
 
