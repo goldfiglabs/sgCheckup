@@ -31,6 +31,8 @@ import (
 
 	"github.com/lib/pq"
 	_ "github.com/lib/pq"
+
+	"goldfiglabs.com/sgcheckup/internal/multirange"
 )
 
 type dbCredential struct {
@@ -497,6 +499,46 @@ type securityGroupRow struct {
 	internalOnly       bool
 }
 
+func (r *securityGroupRow) UnsafePorts(safePorts []int) (*multirange.MultiRange, error) {
+	if r.portRanges.Valid {
+		mr, err := multirange.FromString(r.portRanges.String)
+		if err != nil {
+			return nil, errors.Wrapf(err, "Failed to parse port range %v", r.portRanges.String)
+		}
+		for _, port := range safePorts {
+			mr.RemoveElement(port)
+		}
+		return mr, nil
+	}
+	return &multirange.MultiRange{}, nil
+}
+
+func (r *securityGroupRow) Notes(unsafePorts *multirange.MultiRange) []string {
+	notes := []string{}
+	if unsafePorts.Size() > 0 && !r.internalOnly {
+		notes = append(notes, fmt.Sprintf("Allows traffic from anywhere on TCP ports (%v)", unsafePorts.ToString()))
+	}
+	if r.isLargePublicBlock {
+		notes = append(notes, "Has IP restrictions, but they let through large ranges")
+	}
+	if r.largeRangeCount {
+		notes = append(notes, "Uses a lot of IP Ranges")
+	}
+	if !r.inUse {
+		notes = append(notes, "Not in use")
+	}
+	// if len(notes) == 0:
+	// 	notes.append(f'Traffic: {_unsafe_ports_list(row["ippermissions"])}')
+	// if row['allows_udp']:
+	// 	notes.append('Allows UDP traffic from anywhere')
+	if len(r.ips) > 0 {
+		notes = append(notes, fmt.Sprintf("Contains %v public IP address(es)", len(r.ips)))
+	} else {
+		notes = append(notes, "No public IP addresses found")
+	}
+	return notes
+}
+
 func (r *securityGroupRow) isProblematic() bool {
 	if r.largeRangeCount {
 		return true
@@ -504,7 +546,6 @@ func (r *securityGroupRow) isProblematic() bool {
 	if r.isLargePublicBlock {
 		return true
 	}
-	fmt.Printf("port ranges %v\n", r.portRanges)
 	return false
 }
 
@@ -560,15 +601,14 @@ type reportRow struct {
 	notes     []string
 }
 
-func newReportRow(queryRow *securityGroupRow) *reportRow {
-	return &reportRow{}
-}
-
-func analyzeSecurityGroupResults(results []securityGroupRow) {
+func analyzeSecurityGroupResults(results []securityGroupRow, safePorts []int) ([]reportRow, error) {
 	reportRows := make([]reportRow, len(results))
 	for _, row := range results {
-		fmt.Printf("ARN %v\n", row.arn)
 		var status string
+		unsafePorts, err := row.UnsafePorts(safePorts)
+		if err != nil {
+			return nil, errors.Wrap(err, "Failed to calculate unsafe ports")
+		}
 		if row.isDefault {
 			if row.inUse {
 				if row.isRestricted || row.internalOnly || len(row.ips) == 0 {
@@ -586,7 +626,7 @@ func analyzeSecurityGroupResults(results []securityGroupRow) {
 			}
 		} else {
 			if row.inUse {
-				if row.isRestricted || !row.isProblematic() {
+				if row.isRestricted || (!row.isProblematic() && unsafePorts.Size() == 0) {
 					status = "green"
 				} else if len(row.ips) == 0 {
 					status = "yellow"
@@ -599,11 +639,16 @@ func analyzeSecurityGroupResults(results []securityGroupRow) {
 			}
 		}
 		reportRows = append(reportRows, reportRow{
-			arn:    row.arn,
-			name:   row.groupName,
-			status: status,
+			arn:       row.arn,
+			name:      row.groupName,
+			status:    status,
+			publicIps: row.ips,
+			inUse:     row.inUse,
+			isDefault: row.isDefault,
+			notes:     row.Notes(unsafePorts),
 		})
 	}
+	return reportRows, nil
 }
 
 func main() {
@@ -657,7 +702,8 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
-	analyzeSecurityGroupResults(results)
+	safePorts := []int{22, 80, 443}
+	analyzeSecurityGroupResults(results, safePorts)
 	if !leavePostgresUp {
 		err = postgresService.ShutDown(ctx, dockerClient)
 		if err != nil {
