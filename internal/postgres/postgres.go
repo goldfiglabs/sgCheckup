@@ -17,6 +17,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/wait"
 )
 
+// DBCredential holds credentials for a database user in postgres
 type DBCredential struct {
 	Username string
 	Password string

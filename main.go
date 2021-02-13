@@ -1,145 +1,26 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"database/sql"
 	"flag"
 	"fmt"
-	"os"
 	"strings"
 
 	"github.com/pkg/errors"
 
 	"github.com/aws/aws-sdk-go-v2/config"
 
-	"github.com/docker/docker/api/types"
-	"github.com/docker/docker/api/types/container"
-	"github.com/docker/docker/api/types/network"
-	"github.com/docker/docker/pkg/stdcopy"
 	log "github.com/sirupsen/logrus"
 
 	"github.com/lib/pq"
 	_ "github.com/lib/pq"
 
 	ds "goldfiglabs.com/sgcheckup/internal/dockersession"
+	"goldfiglabs.com/sgcheckup/internal/introspector"
 	"goldfiglabs.com/sgcheckup/internal/multirange"
 	ps "goldfiglabs.com/sgcheckup/internal/postgres"
 )
-
-type introspectorService struct {
-	ds.ContainerService
-}
-
-func (is *introspectorService) runCommand(args []string, env []string) error {
-	envVars := []string{}
-	if env != nil {
-		envVars = append(envVars, env...)
-	}
-	cmdPrefix := []string{"python", "introspector.py"}
-	cmd := append(cmdPrefix, args...)
-	execResp, err := is.DockerSession.Client.ContainerExecCreate(is.DockerSession.Ctx, is.ContainerID, types.ExecConfig{
-		Cmd:          cmd,
-		AttachStderr: true,
-		AttachStdout: true,
-		AttachStdin:  true,
-		Env:          envVars,
-	})
-	if err != nil {
-		return errors.Wrap(err, "Failed to create exec")
-	}
-	resp, err := is.DockerSession.Client.ContainerExecAttach(is.DockerSession.Ctx, execResp.ID, types.ExecStartCheck{})
-	if err != nil {
-		return errors.Wrap(err, "Failed to attach to exec")
-	}
-	defer resp.Close()
-
-	// read the output
-	outputDone := make(chan error)
-	go func() {
-		// StdCopy demultiplexes the stream into two buffers
-		_, err = stdcopy.StdCopy(os.Stdout, os.Stderr, resp.Reader)
-		outputDone <- err
-	}()
-
-	stdin := bufio.NewScanner(os.Stdin)
-	go func() {
-		for stdin.Scan() {
-			resp.Conn.Write(stdin.Bytes())
-			resp.Conn.Write([]byte("\n"))
-		}
-	}()
-
-	select {
-	case err := <-outputDone:
-		if err != nil {
-			return err
-		}
-		break
-
-	case <-is.DockerSession.Ctx.Done():
-		return is.DockerSession.Ctx.Err()
-	}
-
-	return nil
-}
-
-const introspectorRef = "goldfig/introspector:latest"
-const introspectorContainerName = "sgCheckup-introspector"
-
-func createIntrospectorContainer(s *ds.Session, postgresService ps.PostgresService) (*introspectorService, error) {
-	existingContainer, err := s.FindContainer(introspectorContainerName)
-	if err != nil {
-		return nil, errors.Wrap(err, "Failed to list existing containers")
-	}
-	if existingContainer != nil {
-		err = s.StopAndRemoveContainer(existingContainer.ID)
-		if err != nil {
-			return nil, errors.Wrap(err, "Failed to remove existing container")
-		}
-	}
-
-	credential := postgresService.SuperUserCredential()
-	address := postgresService.Address()
-	envVars := []string{
-		fmt.Sprintf("INTROSPECTOR_SU_DB_USER=%v", credential.Username),
-		fmt.Sprintf("INTROSPECTOR_SU_DB_PASSWORD=%v", credential.Password),
-		fmt.Sprintf("INTROSPECTOR_DB_HOST=%v", address.HostIP),
-		fmt.Sprintf("INTROSPECTOR_DB_PORT=%v", address.HostPort),
-	}
-	log.Infof("Using environment %v", envVars)
-	containerBody, err := s.Client.ContainerCreate(s.Ctx, &container.Config{
-		Image:  introspectorRef,
-		Labels: map[string]string{"sgCheckup": "introspector"},
-		Env:    envVars,
-	}, &container.HostConfig{
-		NetworkMode: "host",
-	}, &network.NetworkingConfig{}, nil, introspectorContainerName)
-	if err != nil {
-		return nil, errors.Wrap(err, "Failed to create container")
-	}
-	log.Infof("introspector container ID %v", containerBody.ID)
-	return &introspectorService{
-		ds.ContainerService{ContainerID: containerBody.ID, DockerSession: s},
-	}, nil
-}
-
-func runIntrospector(ds *ds.Session, postgresService ps.PostgresService) (*introspectorService, error) {
-	log.Info("Checking for introspector image")
-	err := ds.RequireImage(introspectorRef)
-	if err != nil {
-		return nil, errors.Wrap(err, "Failed to get instrospector docker image")
-	}
-	service, err := createIntrospectorContainer(ds, postgresService)
-	if err != nil {
-		return nil, err
-	}
-	err = ds.Client.ContainerStart(ds.Ctx, service.ContainerID, types.ContainerStartOptions{})
-	if err != nil {
-		return nil, errors.Wrap(err, "Failed to start introspector")
-	}
-	return service, nil
-}
 
 func loadAwsCredentials(ctx context.Context) ([]string, error) {
 	cfg, err := config.LoadDefaultConfig(ctx)
@@ -479,24 +360,19 @@ func main() {
 		panic(err)
 	}
 	if !skipIntrospector {
-		introspectorService, err := runIntrospector(ds, postgresService)
-		if err != nil {
-			panic(err)
-		}
-		err = introspectorService.runCommand([]string{"init"}, nil)
-		if err != nil {
-			panic(err)
-		}
 		awsCreds, err := loadAwsCredentials(ds.Ctx)
 		if err != nil {
 			panic(err)
 		}
-		err = introspectorService.runCommand(
-			[]string{"account", "aws", "import", "--force", "--service", "ec2=SecurityGroups,NetworkInterfaces"}, awsCreds)
+		i, err := introspector.New(ds, postgresService)
 		if err != nil {
 			panic(err)
 		}
-		err = introspectorService.ShutDown()
+		err = i.ImportAWSService(awsCreds, "ec2=SecurityGroups,NetworkInterfaces")
+		if err != nil {
+			panic(err)
+		}
+		err = i.ShutDown()
 		if err != nil {
 			panic(err)
 		}
