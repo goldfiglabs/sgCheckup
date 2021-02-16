@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <title>sgCheckup - By Gold Fig Labs</title>
+    <style>
+      .report {
+
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+      }
+
+      .report table {
+        font-size: 12px;
+        border-spacing: 0;
+        margin: auto;
+      }
+
+      .report td,
+      .report th {
+        border: 1px solid #888;
+        padding: 4px 16px;
+        text-align: center;
+      }
+
+      .report th {
+        font-style: italic;
+        font-weight: bold;
+      }
+
+      .red {
+        background-color: #f4cccc;
+      }
+
+      .green {
+        background-color: #d9ead3;
+      }
+
+      .yellow {
+        background-color: #fff2cc;
+      }
+
+      .report td.identifier {
+        text-align: left;
+      }
+
+      .two_columns {
+        display: flex;
+        flex-direction: row;
+        justify-content: space-around;
+        max-width: 900px;
+      }
+
+      .legend h3,
+      .legend h4 {
+        margin-bottom: 4px;
+      }
+
+      .two_columns section {
+        padding-left: 8px;
+        padding-right: 8px;
+        padding-top: 0px;
+        max-width: 33%;
+      }
+    </style>
+  </head>
+  <body>
+    <main class="report">
+      <h1>sgCheckup - By Gold Fig Labs</h1>
+      <table>
+        <thead>
+          <tr>
+            <th>#</th>
+            <th>ARN</th>
+            <th>Name</th>
+            <th>Status</th>
+            <th>In&nbsp;Use</th>
+            <th>Is&nbsp;Default</th>
+            <th>Public IPs</th>
+            <th>Notes</th>
+          </tr>
+        </thead>
+        <tbody>
+          {{range $index, $row := .Report}}
+          <tr>
+            <td>{{inc $index}}</td>
+            <td class="identifier">{{$row.Arn}}</td>
+            <td class="identifier">{{$row.Name}}</td>
+            <td class="{{$row.Status}}">{{$row.Status}}</td>
+            <td>{{yn $row.InUse}}</td>
+            <td>{{$row.IsDefault}}</td>
+            <td>{{ipList $row.PublicIps}}</td>
+            <td>{{notes $row.Notes}}</td>
+          </tr>
+          {{end}}
+        </tbody>
+      </table>
+      <div class="legend">
+        <h3>Legend</h3>
+        <div class="two_columns">
+          <section>
+            <h4>Colors</h4>
+            <p>
+              <span class="red">Red</span> - This security group has ports open and contains instances with public IP
+              addresses. Those instances can accept traffic on those ports, and it should be
+              verified that this is intended.
+            </p>
+            <p>
+              <span class="yellow">Yellow</span> - This security
+              group is not ideal, but does not present an immediate risk. It is
+              worth examining to see if it can be further locked down or removed,
+              if unused.
+            </p>
+            <p>
+              <span class="green">Green</span> - No recommendations
+              for this security group.
+            </p>
+          </section>
+          <section>
+            <h4>Assumptions</h4>
+            <p>
+              Default security groups should not be used, and should be locked down.
+              This prevents instances from accidentally inheriting open ports when
+              created.
+            </p>
+            <p>
+              Unused security groups should be removed, as they represent surface area
+              that doesn't need to exist.
+            </p>
+            <p>
+              Ports 22, 80, and 443 are assumed to be open intentionally. More mature
+              organizations may wish to use an SSH bastion host and not open port 22 on
+              every instance, or may with to disable all HTTP traffic, but for this report
+              those changes are out-of-scope.
+            </p>
+            <p>
+              While we do list IP addresses alongside ports that are open, we do not
+              verify whether any of the instances are actually listening on those ports.
+              However, we recommend not relying only on instances not actively listening
+              on a port. The principle of defense-in-depth suggests that if an instance
+              does not need a port open, the firewall should also enforce that.
+            </p>
+          </section>
+        </div>
+      </div>
+    </main>
+  </body>
+</html>
