@@ -4,11 +4,8 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"io/ioutil"
-	"os"
 	"strings"
 
-	"github.com/markbates/pkger"
 	"github.com/pkg/errors"
 
 	"github.com/aws/aws-sdk-go-v2/config"
@@ -48,36 +45,7 @@ func printReportRows(rows []report.Row) {
 	}
 }
 
-func loadAssets() {
-	pkger.Walk("/queries", func(path string, fileinfo os.FileInfo, err error) error {
-		fmt.Printf("%v\n", path)
-		return nil
-	})
-	f, err := pkger.Open("/queries/rfc1918.sql")
-	if err != nil {
-		panic(err)
-	}
-	/*fileInfo, err := f.Stat()
-	if err != nil {
-		panic(err)
-	}
-	buf := make([]byte, 0, int(fileInfo.Size()))
-	_, err := f.Read(buf)
-	if err != nil {
-
-	}*/
-	//reader := bufio.NewReader(f)
-	bytes, err := ioutil.ReadAll(f)
-	if err != nil {
-		panic(err)
-	}
-	s := string(bytes)
-	fmt.Printf("s: %v\n", s)
-	panic(errors.New("nope"))
-}
-
 func main() {
-	// loadAssets()
 	var skipIntrospector, leavePostgresUp, reusePostgres bool
 	flag.BoolVar(&skipIntrospector, "skip-introspector", false, "Skip running an import, use existing data")
 	flag.BoolVar(&leavePostgresUp, "leave-postgres", false, "Leave postgres running in a docker container")
