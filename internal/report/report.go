@@ -3,8 +3,11 @@ package report
 import (
 	"database/sql"
 	"fmt"
+	"io/ioutil"
+	"sort"
 
 	"github.com/lib/pq"
+	"github.com/markbates/pkger"
 	"github.com/pkg/errors"
 	"goldfiglabs.com/sgcheckup/internal/multirange"
 
@@ -110,7 +113,25 @@ func Generate(connectionString string, safePorts []int) (Report, error) {
 	if err != nil {
 		return nil, errors.Wrap(err, "Failed to generate report from query results")
 	}
+	sort.SliceStable(report, func(i, j int) bool {
+		return sortRowsLess(&report[i], &report[j])
+	})
 	return report, nil
+}
+
+var statusIndex map[string]int = map[string]int{
+	"red":    0,
+	"yellow": 1,
+	"green":  2,
+}
+
+func sortRowsLess(a, b *Row) bool {
+	if a.Status == b.Status {
+		return a.Name < b.Name
+	}
+	aIndex := statusIndex[a.Status]
+	bIndex := statusIndex[b.Status]
+	return aIndex < bIndex
 }
 
 func analyzeSecurityGroupResults(results []securityGroupRow, safePorts []int) ([]Row, error) {
@@ -164,19 +185,10 @@ func analyzeSecurityGroupResults(results []securityGroupRow, safePorts []int) ([
 }
 
 func installDbFunctions(db *sql.DB) error {
-	const isRFC1918 = `CREATE OR REPLACE FUNCTION is_rfc1918block(block cidr)
-	RETURNS boolean
-	LANGUAGE plpgsql
-	AS
-	$$
-	BEGIN
-		RETURN
-			('192.168.0.0/16' >>= block)
-			OR ('172.16.0.0/12' >>= block)
-			OR ('10.0.0.0/8' >>= block);
-	END;
-	$$`
-
+	isRFC1918, err := loadQuery("rfc1918")
+	if err != nil {
+		return errors.New("Failed to load sql for is_rfc1918block")
+	}
 	result, err := db.Exec(isRFC1918)
 	if err != nil {
 		return err
@@ -186,6 +198,10 @@ func installDbFunctions(db *sql.DB) error {
 }
 
 func runSecurityGroupQuery(db *sql.DB) ([]securityGroupRow, error) {
+	analysisQuery, err := loadQuery("security_groups")
+	if err != nil {
+		return nil, errors.Wrap(err, "Failed to to load analysis query")
+	}
 	rows, err := db.Query(analysisQuery)
 	if err != nil {
 		return nil, errors.Wrap(err, "DB error analyzing")
@@ -206,94 +222,16 @@ func runSecurityGroupQuery(db *sql.DB) ([]securityGroupRow, error) {
 	return results, nil
 }
 
-const analysisQuery = `WITH ippermissions AS (
-	SELECT
-		SG._id,
-		bool_or(is_rfc1918block((IP.value->>'CidrIp')::cidr) = false AND masklen((IP.value->>'CidrIp')::cidr) BETWEEN 1 AND 23) AS is_large_public_block,
-		bool_and((is_rfc1918block((IP.value->>'CidrIp')::cidr) OR masklen((IP.value->>'CidrIp')::cidr) != 0)) as internal_only,
-		COUNT(*) AS range_count
-	FROM
-		aws_ec2_securitygroup AS SG
-		CROSS JOIN LATERAL jsonb_array_elements(SG.ippermissions) AS P
-		CROSS JOIN LATERAL jsonb_array_elements(P.value->'IpRanges') AS IP
-	GROUP BY SG._id
-), permissions AS (
-SELECT
-	SG._id,
-	permissions.* AS permissions
-FROM
-	aws_ec2_securitygroup AS SG
-	CROSS JOIN LATERAL jsonb_array_elements(SG.ippermissions) AS permissions
-), raw_ranges AS (
-SELECT
-	P._id,
-	P.value AS permission,
-	(R.value ->> 'CidrIp')::cidr AS cidr,
-	COALESCE(((P.value ->> 'FromPort')::int), 0) AS from_port,
-	COALESCE(((P.value ->> 'ToPort')::int), 65535) AS to_port
-FROM
-	permissions as P
-	CROSS JOIN LATERAL jsonb_array_elements(P.value->'IpRanges') AS R
-), public_tcp_ranges AS (
-SELECT
-	R._id,
-	ARRAY_AGG(int4range(R.from_port, R.to_port, '[]')) AS port_ranges
-FROM
-	raw_ranges AS R
-WHERE
-	R.from_port <= R.to_port
-	AND R.cidr = '0.0.0.0/0'::cidr
-	AND R.permission ->> 'IpProtocol' IN ('-1', 'tcp')
-GROUP BY R._id
-), security_group_attrs AS (
-SELECT
-	SG._id,
-	SG._id IN (SELECT DISTINCT(securitygroup_id) FROM aws_ec2_networkinterface_securitygroup) AS in_use,
-	SG.groupname = 'default' AS is_default,
-	R.port_ranges,
-	COALESCE(IP.is_large_public_block, false) AS is_large_public_block,
-	COALESCE(IP.range_count, 0) > 50 AS large_range_count,
-	COALESCE(IP.range_count, 0) = 0 AS is_restricted,
-	COALESCE(IP.internal_only, true) AS internal_only
-FROM
-	aws_ec2_securitygroup AS SG
-	LEFT JOIN ippermissions AS IP
-		ON SG._id = IP._id
-	LEFT JOIN public_tcp_ranges AS R
-		ON SG._id = R._id
-), publicips AS (
-	SELECT
-		SG._id,
-		ARRAY_AGG((NI.association ->> 'PublicIp')::inet) AS ips
-	FROM
-		aws_ec2_securitygroup AS SG
-		INNER JOIN aws_ec2_networkinterface_securitygroup AS NI2SG
-			ON SG._id = NI2SG.securitygroup_id
-		INNER JOIN aws_ec2_networkinterface AS NI
-			ON NI2SG.networkinterface_id = NI._id
-	WHERE
-		NI.association IS NOT NULL
-	GROUP BY
-		SG._id
-)
-SELECT
-	SG.uri AS arn,
-	SG.groupname,
-	COALESCE(P.ips, '{}') AS ips,
-	Attrs.in_use,
-	Attrs.is_default,
-	Attrs.port_ranges,
-	-- Attrs.allows_udp,
-	-- SG.unsafe_ports,
-	Attrs.is_large_public_block,
-	Attrs.large_range_count,
-	Attrs.is_restricted,
-	Attrs.internal_only
-	-- SG.ippermissions
-FROM
-	aws_ec2_securitygroup AS SG
-	LEFT JOIN security_group_attrs AS Attrs
-		ON SG._id = Attrs._id
-	LEFT JOIN publicips AS P
-		ON P._id = SG._id
-`
+func loadQuery(name string) (string, error) {
+	filename := "/queries/" + name + ".sql"
+	f, err := pkger.Open(filename)
+	if err != nil {
+		return "", errors.Wrapf(err, "Failed to open %v", filename)
+	}
+	defer f.Close()
+	bytes, err := ioutil.ReadAll(f)
+	if err != nil {
+		return "", errors.Wrapf(err, "Failed to read %v", filename)
+	}
+	return string(bytes), nil
+}
