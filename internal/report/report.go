@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"io/ioutil"
 	"sort"
+	"strings"
+	"time"
 
 	"github.com/lib/pq"
 	"github.com/markbates/pkger"
@@ -83,11 +85,25 @@ type Row struct {
 	Notes     []string
 }
 
-type Report = []Row
+// Metadata includes information about the report, such as when the data was
+// snapshotted and for what account
+type Metadata struct {
+	Imported     time.Time
+	Generated    time.Time
+	Account      string
+	Organization string
+}
+
+type Report struct {
+	Metadata *Metadata
+	Rows     []Row
+}
 
 var defaultSafePorts = []int{22, 80, 443}
 
-func Generate(connectionString string, safePorts []int) (Report, error) {
+// Generate uses a connection string to postgres and a list of designated-safe ports
+// to produce a report assessing the risk of each security group that has been imported.
+func Generate(connectionString string, safePorts []int) (*Report, error) {
 	db, err := sql.Open("postgres", connectionString)
 	if err != nil {
 		return nil, errors.Wrap(err, "Failed to connect to db")
@@ -109,14 +125,21 @@ func Generate(connectionString string, safePorts []int) (Report, error) {
 	if safePorts == nil {
 		safePorts = defaultSafePorts
 	}
-	report, err := analyzeSecurityGroupResults(rows, safePorts)
+	reportRows, err := analyzeSecurityGroupResults(rows, safePorts)
 	if err != nil {
 		return nil, errors.Wrap(err, "Failed to generate report from query results")
 	}
-	sort.SliceStable(report, func(i, j int) bool {
-		return sortRowsLess(&report[i], &report[j])
+	sort.SliceStable(reportRows, func(i, j int) bool {
+		return sortRowsLess(&reportRows[i], &reportRows[j])
 	})
-	return report, nil
+	metadata, err := loadMetadata(db, reportRows)
+	if err != nil {
+		return nil, errors.Wrap(err, "Failed to load metadata")
+	}
+	return &Report{
+		Rows:     reportRows,
+		Metadata: metadata,
+	}, nil
 }
 
 var statusIndex map[string]int = map[string]int{
@@ -125,9 +148,53 @@ var statusIndex map[string]int = map[string]int{
 	"green":  2,
 }
 
+func arnRegion(arn string) string {
+	parts := strings.Split(arn, ":")
+	return parts[3]
+}
+
+func loadMetadata(db *sql.DB, reportRows []Row) (*Metadata, error) {
+	query, err := loadQuery("most_recent_import")
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to load query")
+	}
+	queryRows, err := db.Query(query)
+	if err != nil {
+		return nil, errors.Wrap(err, "Failed to query for most recent import")
+	}
+	defer queryRows.Close()
+	if !queryRows.Next() {
+		return nil, errors.New("Query for most recent import job found no results")
+	}
+	var endDate time.Time
+	var organization string
+	err = queryRows.Scan(&endDate, &organization)
+	if err != nil {
+		return nil, errors.Wrap(err, "Failed to read most recent import job row")
+	}
+	arn := reportRows[0].Arn
+	parts := strings.Split(arn, ":")
+	accountID := parts[4]
+	if strings.HasPrefix(organization, "OrgDummy") {
+		organization = "<NONE>"
+	}
+	return &Metadata{
+		Imported:     endDate,
+		Generated:    time.Now(),
+		Account:      accountID,
+		Organization: organization,
+	}, nil
+}
+
+// Sort by status first, then region, then name
 func sortRowsLess(a, b *Row) bool {
 	if a.Status == b.Status {
-		return a.Name < b.Name
+		aRegion := arnRegion(a.Arn)
+		bRegion := arnRegion(b.Arn)
+		if aRegion == bRegion {
+			return a.Name < b.Name
+		}
+		return aRegion < bRegion
 	}
 	aIndex := statusIndex[a.Status]
 	bIndex := statusIndex[b.Status]

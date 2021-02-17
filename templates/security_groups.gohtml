@@ -49,6 +49,7 @@
         flex-direction: row;
         justify-content: space-around;
         max-width: 900px;
+        width: 100%;
       }
 
       .legend h3,
@@ -60,13 +61,36 @@
         padding-left: 8px;
         padding-right: 8px;
         padding-top: 0px;
-        max-width: 33%;
+        max-width: 50%;
+      }
+
+      .metadata {
+        font-weight: bold;
       }
     </style>
   </head>
   <body>
     <main class="report">
       <h1>sgCheckup - By Gold Fig Labs</h1>
+      <div class="two_columns" style="width: 100%;">
+        <section>
+          <p>
+            Security Groups snapshotted at:
+            <span class="metadata">{{humanize .Report.Metadata.Imported}}</span>
+          </p>
+          <p>
+            Report generated at:
+            <span class="metadata">{{humanize .Report.Metadata.Generated}}</span>
+          </p>
+        </section>
+        <section>
+          <p>
+            Organization:
+            <span class="metadata">{{.Report.Metadata.Organization}}</span>
+          </p>
+          <p>Account ID: <span class="metadata">{{.Report.Metadata.Account}}</span></p>
+        </section>
+      </div>
       <table>
         <thead>
           <tr>
@@ -81,7 +105,7 @@
           </tr>
         </thead>
         <tbody>
-          {{range $index, $row := .Report}}
+          {{range $index, $row := .Report.Rows}}
           <tr>
             <td>{{inc $index}}</td>
             <td class="identifier">{{$row.Arn}}</td>

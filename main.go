@@ -9,6 +9,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/markbates/pkger"
 	"github.com/pkg/errors"
@@ -51,10 +52,10 @@ func printReportRows(rows []report.Row) {
 }
 
 type templateData struct {
-	Report report.Report
+	Report *report.Report
 }
 
-func writeHtmlReport(report report.Report, outputFilename string) error {
+func writeHTMLReport(report *report.Report, outputFilename string) error {
 	filename := "/templates/security_groups.gohtml"
 	f, err := pkger.Open(filename)
 	if err != nil {
@@ -87,6 +88,9 @@ func writeHtmlReport(report report.Report, outputFilename string) error {
 				return strings.Join(ips[:8], ", ") + "...(+" + strconv.Itoa(len(ips)-8) + ")"
 			}
 			return strings.Join(ips, ", ") + " (" + strconv.Itoa(len(ips)) + ")"
+		},
+		"humanize": func(t time.Time) string {
+			return t.Format(time.RFC1123)
 		},
 	})
 	t, err = t.Parse(string(bytes))
@@ -156,7 +160,7 @@ func main() {
 		panic(err)
 	}
 	// printReportRows(report)
-	err = writeHtmlReport(report, "index.html")
+	err = writeHTMLReport(report, "index.html")
 	if err != nil {
 		panic(err)
 	}
