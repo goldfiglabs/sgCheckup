@@ -15,3 +15,5 @@
 # vendor/
 dist/
 .vscode/
+main
+index.html

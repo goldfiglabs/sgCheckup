@@ -18,9 +18,9 @@ import (
 
 	log "github.com/sirupsen/logrus"
 
-	ds "goldfiglabs.com/sgcheckup/internal/dockersession"
-	"goldfiglabs.com/sgcheckup/internal/introspector"
-	ps "goldfiglabs.com/sgcheckup/internal/postgres"
+	ds "github.com/goldfiglabs/go-introspector/dockersession"
+	"github.com/goldfiglabs/go-introspector/introspector"
+	ps "github.com/goldfiglabs/go-introspector/postgres"
 	"goldfiglabs.com/sgcheckup/internal/report"
 )
 
@@ -112,10 +112,14 @@ func writeHTMLReport(report *report.Report, outputFilename string) error {
 func main() {
 	pkger.Include("/templates")
 	pkger.Include("/queries")
-	var skipIntrospector, leavePostgresUp, reusePostgres bool
+	var skipIntrospector, leavePostgresUp, logIntrospector, reusePostgres, skipIntrospectorPull bool
+	var introspectorRef string
 	flag.BoolVar(&skipIntrospector, "skip-introspector", false, "Skip running an import, use existing data")
 	flag.BoolVar(&leavePostgresUp, "leave-postgres", false, "Leave postgres running in a docker container")
 	flag.BoolVar(&reusePostgres, "reuse-postgres", false, "Reuse an existing postgres instance, if it is running")
+	flag.BoolVar(&logIntrospector, "log-introspector", false, "Pass through logs from introspector docker image")
+	flag.BoolVar(&skipIntrospectorPull, "skip-introspector-pull", false, "Skip pulling the introspector docker image. Allows for using a local image")
+	flag.StringVar(&introspectorRef, "introspector-ref", "", "Override the introspector docker image to use")
 	flag.Parse()
 
 	ds, err := ds.NewSession()
@@ -142,7 +146,11 @@ func main() {
 		if err != nil {
 			panic(err)
 		}
-		i, err := introspector.New(ds, postgresService)
+		i, err := introspector.New(ds, postgresService, introspector.Options{
+			LogDockerOutput: logIntrospector,
+			SkipDockerPull:  skipIntrospectorPull,
+			InspectorRef:    introspectorRef,
+		})
 		if err != nil {
 			panic(err)
 		}
