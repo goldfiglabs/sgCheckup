@@ -82,7 +82,7 @@ func writeHTMLReport(report *report.Report, outputFilename string) error {
 		},
 		"ipList": func(ips []string) string {
 			if len(ips) == 0 {
-				return "<NONE>"
+				return "-"
 			}
 			if len(ips) > 8 {
 				return strings.Join(ips[:8], ", ") + "...(+" + strconv.Itoa(len(ips)-8) + ")"
@@ -91,6 +91,16 @@ func writeHTMLReport(report *report.Report, outputFilename string) error {
 		},
 		"humanize": func(t time.Time) string {
 			return t.Format(time.RFC1123)
+		},
+		"portList": func(intPorts []int) string {
+			if len(intPorts) == 0 {
+				return "-"
+			}
+			ports := []string{}
+			for _, intPort := range intPorts {
+				ports = append(ports, strconv.Itoa(intPort))
+			}
+			return strings.Join(ports, ", ")
 		},
 	})
 	t, err = t.Parse(string(bytes))
@@ -109,17 +119,31 @@ func writeHTMLReport(report *report.Report, outputFilename string) error {
 	return nil
 }
 
+func parseSafePorts(s string) ([]int, error) {
+	stringPorts := strings.Split(s, ",")
+	ports := []int{}
+	for _, stringPort := range stringPorts {
+		port, err := strconv.Atoi(stringPort)
+		if err != nil {
+			return nil, err
+		}
+		ports = append(ports, port)
+	}
+	return ports, nil
+}
+
 func main() {
 	pkger.Include("/templates")
 	pkger.Include("/queries")
 	var skipIntrospector, leavePostgresUp, logIntrospector, reusePostgres, skipIntrospectorPull bool
-	var introspectorRef string
+	var introspectorRef, safePortsList string
 	flag.BoolVar(&skipIntrospector, "skip-introspector", false, "Skip running an import, use existing data")
 	flag.BoolVar(&leavePostgresUp, "leave-postgres", false, "Leave postgres running in a docker container")
 	flag.BoolVar(&reusePostgres, "reuse-postgres", false, "Reuse an existing postgres instance, if it is running")
 	flag.BoolVar(&logIntrospector, "log-introspector", false, "Pass through logs from introspector docker image")
 	flag.BoolVar(&skipIntrospectorPull, "skip-introspector-pull", false, "Skip pulling the introspector docker image. Allows for using a local image")
 	flag.StringVar(&introspectorRef, "introspector-ref", "", "Override the introspector docker image to use")
+	flag.StringVar(&safePortsList, "safe-ports", "22,80,443", "Specify a comma-separated list of ports considered safe. Default is 22,80,443")
 	flag.Parse()
 
 	ds, err := ds.NewSession()
@@ -163,7 +187,14 @@ func main() {
 			panic(err)
 		}
 	}
-	report, err := report.Generate(postgresService.ConnectionString(importer), nil)
+
+	safePorts, err := parseSafePorts(safePortsList)
+	if err != nil {
+		panic(err)
+	}
+	report, err := report.Generate(postgresService.ConnectionString(importer), report.GenerateOpts{
+		SafePorts: safePorts,
+	})
 	if err != nil {
 		panic(err)
 	}

@@ -4,21 +4,19 @@
     <title>sgCheckup - By Gold Fig Labs</title>
     <style>
       .report {
-
         display: flex;
         flex-direction: column;
         align-items: center;
       }
 
       .report table {
-        font-size: 12px;
+        font-size: 16px;
         border-spacing: 0;
         margin: auto;
       }
 
       .report td,
       .report th {
-        border: 1px solid #888;
         padding: 4px 16px;
         text-align: center;
       }
@@ -26,6 +24,10 @@
       .report th {
         font-style: italic;
         font-weight: bold;
+      }
+
+      .report tr:nth-child(even) {
+         background-color: #f2f2f2;
       }
 
       .red {
@@ -84,18 +86,18 @@
           </p>
         </section>
         <section>
-          <p>
+          <!--p>
             Organization:
             <span class="metadata">{{.Report.Metadata.Organization}}</span>
-          </p>
+          </p-->
           <p>Account ID: <span class="metadata">{{.Report.Metadata.Account}}</span></p>
+          <p>Safe Ports Assumed: <span class="metadata">{{portList .Report.Metadata.SafePorts}}</span></p>
         </section>
       </div>
       <table>
         <thead>
           <tr>
             <th>#</th>
-            <th>ARN</th>
             <th>Name</th>
             <th>Status</th>
             <th>In&nbsp;Use</th>
@@ -108,11 +110,10 @@
           {{range $index, $row := .Report.Rows}}
           <tr>
             <td>{{inc $index}}</td>
-            <td class="identifier">{{$row.Arn}}</td>
-            <td class="identifier">{{$row.Name}}</td>
+            <td class="identifier"><a href="{{$row.Url}}" target="_blank" rel="nofollow">{{$row.Name}}</a></td>
             <td class="{{$row.Status}}">{{$row.Status}}</td>
             <td>{{yn $row.InUse}}</td>
-            <td>{{$row.IsDefault}}</td>
+            <td>{{yn $row.IsDefault}}</td>
             <td>{{ipList $row.PublicIps}}</td>
             <td>{{notes $row.Notes}}</td>
           </tr>
@@ -152,15 +153,9 @@
               that doesn't need to exist.
             </p>
             <p>
-              Ports 22, 80, and 443 are assumed to be open intentionally. More mature
-              organizations may wish to use an SSH bastion host and not open port 22 on
-              every instance, or may with to disable all HTTP traffic, but for this report
-              those changes are out-of-scope.
-            </p>
-            <p>
               While we do list IP addresses alongside ports that are open, we do not
               verify whether any of the instances are actually listening on those ports.
-              However, we recommend not relying only on instances not actively listening
+              We recommend not relying only on instances not actively listening
               on a port. The principle of defense-in-depth suggests that if an instance
               does not need a port open, the firewall should also enforce that.
             </p>

@@ -29,6 +29,22 @@ type securityGroupRow struct {
 	internalOnly       bool
 }
 
+func consoleUrl(arn string) string {
+	parts := strings.Split(arn, ":")
+	partition := parts[1]
+	var console string
+	if partition == "aws" {
+		console = "console.aws.amazon.com"
+	} else if partition == "aws-us-gov" {
+		console = "console.amazonaws-us-gov.com"
+	} else {
+		console = "console.amazonaws.cn"
+	}
+	region := parts[3]
+	groupID := strings.Split(parts[5], "/")[1]
+	return "https://" + region + "." + console + "/ec2/v2/home?region=" + region + "#SecurityGroup:groupId=" + groupID
+}
+
 func (r *securityGroupRow) isProblematic() bool {
 	if r.largeRangeCount {
 		return true
@@ -77,6 +93,7 @@ func (r *securityGroupRow) notes(unsafePorts *multirange.MultiRange) []string {
 
 type Row struct {
 	Arn       string
+	Url       string
 	Name      string
 	Status    string
 	PublicIps []string
@@ -92,6 +109,7 @@ type Metadata struct {
 	Generated    time.Time
 	Account      string
 	Organization string
+	SafePorts    []int
 }
 
 type Report struct {
@@ -99,11 +117,20 @@ type Report struct {
 	Rows     []Row
 }
 
-var defaultSafePorts = []int{22, 80, 443}
+type GenerateOpts struct {
+	SafePorts []int
+}
+
+func (o *GenerateOpts) fillInDefaults() {
+	if o.SafePorts == nil {
+		o.SafePorts = []int{}
+	}
+}
 
 // Generate uses a connection string to postgres and a list of designated-safe ports
 // to produce a report assessing the risk of each security group that has been imported.
-func Generate(connectionString string, safePorts []int) (*Report, error) {
+func Generate(connectionString string, opts GenerateOpts) (*Report, error) {
+	opts.fillInDefaults()
 	db, err := sql.Open("postgres", connectionString)
 	if err != nil {
 		return nil, errors.Wrap(err, "Failed to connect to db")
@@ -122,17 +149,14 @@ func Generate(connectionString string, safePorts []int) (*Report, error) {
 	if err != nil {
 		return nil, errors.Wrap(err, "Failed to run analysis query")
 	}
-	if safePorts == nil {
-		safePorts = defaultSafePorts
-	}
-	reportRows, err := analyzeSecurityGroupResults(rows, safePorts)
+	reportRows, err := analyzeSecurityGroupResults(rows, opts.SafePorts)
 	if err != nil {
 		return nil, errors.Wrap(err, "Failed to generate report from query results")
 	}
 	sort.SliceStable(reportRows, func(i, j int) bool {
 		return sortRowsLess(&reportRows[i], &reportRows[j])
 	})
-	metadata, err := loadMetadata(db, reportRows)
+	metadata, err := loadMetadata(db, reportRows, opts.SafePorts)
 	if err != nil {
 		return nil, errors.Wrap(err, "Failed to load metadata")
 	}
@@ -153,7 +177,7 @@ func arnRegion(arn string) string {
 	return parts[3]
 }
 
-func loadMetadata(db *sql.DB, reportRows []Row) (*Metadata, error) {
+func loadMetadata(db *sql.DB, reportRows []Row, safePorts []int) (*Metadata, error) {
 	query, err := loadQuery("most_recent_import")
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to load query")
@@ -183,6 +207,7 @@ func loadMetadata(db *sql.DB, reportRows []Row) (*Metadata, error) {
 		Generated:    time.Now(),
 		Account:      accountID,
 		Organization: organization,
+		SafePorts:    safePorts,
 	}, nil
 }
 
@@ -240,6 +265,7 @@ func analyzeSecurityGroupResults(results []securityGroupRow, safePorts []int) ([
 		}
 		reportRows = append(reportRows, Row{
 			Arn:       row.arn,
+			Url:       consoleUrl(row.arn),
 			Name:      row.groupName,
 			Status:    status,
 			PublicIps: row.ips,
