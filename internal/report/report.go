@@ -140,7 +140,6 @@ func Generate(connectionString string, opts GenerateOpts) (*Report, error) {
 	if err != nil {
 		return nil, errors.Wrap(err, "Failed to ping db")
 	}
-	log.Info("db ready")
 	err = installDbFunctions(db)
 	if err != nil {
 		return nil, errors.Wrap(err, "Failed to install fixture functions")
@@ -282,11 +281,10 @@ func installDbFunctions(db *sql.DB) error {
 	if err != nil {
 		return errors.New("Failed to load sql for is_rfc1918block")
 	}
-	result, err := db.Exec(isRFC1918)
+	_, err = db.Exec(isRFC1918)
 	if err != nil {
 		return err
 	}
-	log.Infof("result %v", result)
 	return nil
 }
 
@@ -311,7 +309,7 @@ func runSecurityGroupQuery(db *sql.DB) ([]securityGroupRow, error) {
 		}
 		results = append(results, row)
 	}
-	log.Infof("rows %v", len(results))
+	log.Infof("# Report Rows: %v", len(results))
 	return results, nil
 }
 

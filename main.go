@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/csv"
 	"flag"
 	"fmt"
 	"html/template"
@@ -24,14 +25,26 @@ import (
 	"goldfiglabs.com/sgcheckup/internal/report"
 )
 
+type awsAuthError struct {
+	Err error
+}
+
+func (e *awsAuthError) Error() string {
+	return "Failed to find AWS Credentials"
+}
+
+func (e *awsAuthError) Unwrap() error {
+	return e.Err
+}
+
 func loadAwsCredentials(ctx context.Context) ([]string, error) {
 	cfg, err := config.LoadDefaultConfig(ctx)
 	if err != nil {
-		return nil, err
+		return nil, &awsAuthError{err}
 	}
 	creds, err := cfg.Credentials.Retrieve(ctx)
 	if err != nil {
-		return nil, err
+		return nil, &awsAuthError{err}
 	}
 	env := []string{
 		fmt.Sprintf("AWS_ACCESS_KEY_ID=%v", creds.AccessKeyID),
@@ -43,12 +56,34 @@ func loadAwsCredentials(ctx context.Context) ([]string, error) {
 	return env, nil
 }
 
-func printReportRows(rows []report.Row) {
-	log.Infof("Report rows %v", len(rows))
-	for _, r := range rows {
+func printReportRows(report *report.Report) {
+	for _, r := range report.Rows {
 		fmt.Printf("Name %v Status %v # Public Ips %v In Use %v Is Default %v %v\n",
 			r.Name, r.Status, len(r.PublicIps), r.InUse, r.IsDefault, strings.Join(r.Notes, ","))
 	}
+}
+
+func writeCSVReport(rpReport *report.Report, outputFilename string) error {
+	outputFile, err := os.Create(outputFilename)
+	if err != nil {
+		return errors.Wrapf(err, "Failed to create output file %v", outputFilename)
+	}
+	defer outputFile.Close()
+	writer := csv.NewWriter(outputFile)
+	defer writer.Flush()
+	writer.Write([]string{"ARN", "Name", "Status", "Public Ips", "In Use", "Is Default", "Notes"})
+	for _, row := range rpReport.Rows {
+		writer.Write([]string{
+			row.Arn,
+			row.Name,
+			row.Status,
+			strings.Join(row.PublicIps, ","),
+			strconv.FormatBool(row.InUse),
+			strconv.FormatBool(row.IsDefault),
+			strings.Join(row.Notes, ", "),
+		})
+	}
+	return nil
 }
 
 type templateData struct {
@@ -119,6 +154,24 @@ func writeHTMLReport(report *report.Report, outputFilename string) error {
 	return nil
 }
 
+type resourceSpecMap = map[string][]string
+
+var supportedResources resourceSpecMap = map[string][]string{
+	"ec2": {"SecurityGroups", "NetworkInterfaces"},
+}
+
+func serviceSpec(r resourceSpecMap) string {
+	services := []string{}
+	for service, resources := range r {
+		if resources == nil {
+			services = append(services, service)
+		} else {
+			services = append(services, service+"="+strings.Join(resources, ","))
+		}
+	}
+	return strings.Join(services, ";")
+}
+
 func parseSafePorts(s string) ([]int, error) {
 	stringPorts := strings.Split(s, ",")
 	ports := []int{}
@@ -135,15 +188,17 @@ func parseSafePorts(s string) ([]int, error) {
 func main() {
 	pkger.Include("/templates")
 	pkger.Include("/queries")
-	var skipIntrospector, leavePostgresUp, logIntrospector, reusePostgres, skipIntrospectorPull bool
-	var introspectorRef, safePortsList string
+	var skipIntrospector, leavePostgresUp, logIntrospector, reusePostgres, skipIntrospectorPull, printToStdOut bool
+	var outputDir, introspectorRef, safePortsList string
 	flag.BoolVar(&skipIntrospector, "skip-introspector", false, "Skip running an import, use existing data")
 	flag.BoolVar(&leavePostgresUp, "leave-postgres", false, "Leave postgres running in a docker container")
 	flag.BoolVar(&reusePostgres, "reuse-postgres", false, "Reuse an existing postgres instance, if it is running")
 	flag.BoolVar(&logIntrospector, "log-introspector", false, "Pass through logs from introspector docker image")
 	flag.BoolVar(&skipIntrospectorPull, "skip-introspector-pull", false, "Skip pulling the introspector docker image. Allows for using a local image")
+	flag.BoolVar(&printToStdOut, "print-to-stdout", false, "Print report results to stdout")
 	flag.StringVar(&introspectorRef, "introspector-ref", "", "Override the introspector docker image to use")
 	flag.StringVar(&safePortsList, "safe-ports", "22,80,443", "Specify a comma-separated list of ports considered safe. Default is 22,80,443")
+	flag.StringVar(&outputDir, "output", "output", "Specify a directory for output")
 	flag.Parse()
 
 	ds, err := ds.NewSession()
@@ -161,14 +216,29 @@ func main() {
 	postgresService, err := ps.NewDockerPostgresService(ds, ps.DockerPostgresOptions{
 		ReuseExisting:       reusePostgres,
 		SuperUserCredential: superuser,
+		ContainerName:       "sgCheckup-db",
 	})
 	if err != nil {
 		panic(err)
 	}
+	shutdownPostgres := func() {
+		if !leavePostgresUp {
+			err = postgresService.ShutDown()
+			if err != nil {
+				panic(err)
+			}
+		}
+	}
 	if !skipIntrospector {
 		awsCreds, err := loadAwsCredentials(ds.Ctx)
 		if err != nil {
-			panic(err)
+			var authErr *awsAuthError
+			if errors.As(err, &authErr) {
+				shutdownPostgres()
+				log.Fatal("Failed to find AWS Credentials. Please ensure that your enviroment is correctly configued as described here: https://docs.aws.amazon.com/cli/latest/userguide/cli-chap-configure.html")
+			} else {
+				panic(err)
+			}
 		}
 		i, err := introspector.New(ds, postgresService, introspector.Options{
 			LogDockerOutput: logIntrospector,
@@ -178,7 +248,10 @@ func main() {
 		if err != nil {
 			panic(err)
 		}
-		err = i.ImportAWSService(awsCreds, "ec2=SecurityGroups,NetworkInterfaces")
+		spec := serviceSpec(supportedResources)
+		log.Infof("Running introspector with service spec %v", spec)
+		log.Info("Introspector run may take a few minutes")
+		err = i.ImportAWSService(awsCreds, spec)
 		if err != nil {
 			panic(err)
 		}
@@ -198,15 +271,23 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
-	// printReportRows(report)
-	err = writeHTMLReport(report, "index.html")
-	if err != nil {
-		panic(err)
-	}
-	if !leavePostgresUp {
-		err = postgresService.ShutDown()
+	if _, err := os.Stat(outputDir); os.IsNotExist(err) {
+		err = os.Mkdir(outputDir, 0755)
 		if err != nil {
 			panic(err)
 		}
 	}
+	if printToStdOut {
+		printReportRows(report)
+	}
+	err = writeHTMLReport(report, outputDir+"/index.html")
+	if err != nil {
+		panic(err)
+	}
+	err = writeCSVReport(report, outputDir+"/report.csv")
+	if err != nil {
+		panic(err)
+	}
+	log.Infof("Reports written to directory %v", outputDir)
+	shutdownPostgres()
 }
