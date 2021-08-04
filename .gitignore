@@ -15,6 +15,7 @@
 # vendor/
 dist/
 .vscode/
-main
-index.html
 output/
+
+# Generated code for including files/dirs
+pkged.go
