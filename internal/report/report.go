@@ -2,6 +2,7 @@ package report
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"io/ioutil"
 	"sort"
@@ -16,17 +17,57 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
+type PairedGroup struct {
+	Name       string
+	URI        string
+	ToPort     int
+	FromPort   int
+	IpProtocol string
+	GroupId    string
+}
+
+type PairedGroups []PairedGroup
+type ExternalSecurityGroups map[string]PairedGroup
+
+func (pairedGroups *PairedGroups) Scan(value interface{}) error {
+	switch v := value.(type) {
+	case []byte:
+		return json.Unmarshal(v, pairedGroups)
+	case string:
+		return json.Unmarshal([]byte(v), pairedGroups)
+	case nil:
+		*pairedGroups = []PairedGroup{}
+		return nil
+	}
+	return errors.New("type assertion failed")
+}
+
+func (externalGroups *ExternalSecurityGroups) Scan(value interface{}) error {
+	switch v := value.(type) {
+	case []byte:
+		return json.Unmarshal(v, externalGroups)
+	case string:
+		return json.Unmarshal([]byte(v), externalGroups)
+	case nil:
+		*externalGroups = map[string]PairedGroup{}
+		return nil
+	}
+	return errors.New("type assertion failed")
+}
+
 type securityGroupRow struct {
-	arn                string
-	groupName          string
-	ips                []string
-	inUse              bool
-	isDefault          bool
-	portRanges         []string
-	isLargePublicBlock bool
-	largeRangeCount    bool
-	isRestricted       bool
-	internalOnly       bool
+	arn                  string
+	groupName            string
+	ips                  []string
+	inUse                bool
+	isDefault            bool
+	portRanges           []string
+	isLargePublicBlock   bool
+	largeRangeCount      bool
+	isRestricted         bool
+	internalOnly         bool
+	pairedSecurityGroups PairedGroups
+	externalGroups       ExternalSecurityGroups
 }
 
 func consoleUrl(arn string) string {
@@ -233,9 +274,10 @@ func analyzeSecurityGroupResults(results []securityGroupRow, safePorts []int) ([
 		if err != nil {
 			return nil, errors.Wrap(err, "Failed to calculate unsafe ports")
 		}
+		externalGroupCount := len(row.externalGroups)
 		if row.isDefault {
 			if row.inUse {
-				if row.isRestricted || row.internalOnly || len(row.ips) == 0 {
+				if externalGroupCount == 0 && (row.isRestricted || row.internalOnly || len(row.ips) == 0) {
 					status = "yellow"
 				} else {
 					status = "red"
@@ -250,10 +292,14 @@ func analyzeSecurityGroupResults(results []securityGroupRow, safePorts []int) ([
 			}
 		} else {
 			if row.inUse {
-				if row.isRestricted || (!row.isProblematic() && unsafePorts.Size() == 0) {
-					status = "green"
-				} else if len(row.ips) == 0 {
-					status = "yellow"
+				if externalGroupCount == 0 {
+					if row.isRestricted || (!row.isProblematic() && unsafePorts.Size() == 0) {
+						status = "green"
+					} else if len(row.ips) == 0 {
+						status = "yellow"
+					} else {
+						status = "red"
+					}
 				} else {
 					status = "red"
 				}
@@ -303,7 +349,7 @@ func runSecurityGroupQuery(db *sql.DB) ([]securityGroupRow, error) {
 		row := securityGroupRow{}
 		err = rows.Scan(&row.arn, &row.groupName, pq.Array(&row.ips), &row.inUse, &row.isDefault,
 			pq.Array(&row.portRanges),
-			&row.isLargePublicBlock, &row.largeRangeCount, &row.isRestricted, &row.internalOnly)
+			&row.isLargePublicBlock, &row.largeRangeCount, &row.isRestricted, &row.internalOnly, &row.pairedSecurityGroups, &row.externalGroups)
 		if err != nil {
 			return nil, errors.Wrap(err, "Failed to unmarshal a row")
 		}
