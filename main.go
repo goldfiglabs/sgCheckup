@@ -22,6 +22,7 @@ import (
 	ds "github.com/goldfiglabs/go-introspector/dockersession"
 	"github.com/goldfiglabs/go-introspector/introspector"
 	ps "github.com/goldfiglabs/go-introspector/postgres"
+	"goldfiglabs.com/sgcheckup/internal/nmap"
 	"goldfiglabs.com/sgcheckup/internal/report"
 )
 
@@ -173,8 +174,11 @@ func serviceSpec(r resourceSpecMap) string {
 }
 
 func parseSafePorts(s string) ([]int, error) {
-	stringPorts := strings.Split(s, ",")
 	ports := []int{}
+	if s == "" {
+		return ports, nil
+	}
+	stringPorts := strings.Split(s, ",")
 	for _, stringPort := range stringPorts {
 		port, err := strconv.Atoi(stringPort)
 		if err != nil {
@@ -188,16 +192,31 @@ func parseSafePorts(s string) ([]int, error) {
 func main() {
 	pkger.Include("/templates")
 	pkger.Include("/queries")
-	var skipIntrospector, leavePostgresUp, logIntrospector, reusePostgres, skipIntrospectorPull, printToStdOut bool
-	var outputDir, introspectorRef, safePortsList string
+	// introspector options
+	var skipIntrospector, logIntrospector, skipIntrospectorPull bool
+	var introspectorRef string
 	flag.BoolVar(&skipIntrospector, "skip-introspector", false, "Skip running an import, use existing data")
-	flag.BoolVar(&leavePostgresUp, "leave-postgres", false, "Leave postgres running in a docker container")
-	flag.BoolVar(&reusePostgres, "reuse-postgres", false, "Reuse an existing postgres instance, if it is running")
 	flag.BoolVar(&logIntrospector, "log-introspector", false, "Pass through logs from introspector docker image")
 	flag.BoolVar(&skipIntrospectorPull, "skip-introspector-pull", false, "Skip pulling the introspector docker image. Allows for using a local image")
-	flag.BoolVar(&printToStdOut, "print-to-stdout", false, "Print report results to stdout")
 	flag.StringVar(&introspectorRef, "introspector-ref", "", "Override the introspector docker image to use")
+	// postgres options
+	var leavePostgresUp, reusePostgres bool
+	flag.BoolVar(&leavePostgresUp, "leave-postgres", false, "Leave postgres running in a docker container")
+	flag.BoolVar(&reusePostgres, "reuse-postgres", false, "Reuse an existing postgres instance, if it is running")
+	// report options
+	var safePortsList string
 	flag.StringVar(&safePortsList, "safe-ports", "22,80,443", "Specify a comma-separated list of ports considered safe. Default is 22,80,443")
+	// nmap options
+	var extraNMapArgs, nMapDockerRef string
+	var nativeNMap, skipNMap bool
+	flag.BoolVar(&skipNMap, "skip-nmap", false, "Skip generating nmap scripts")
+	flag.BoolVar(&nativeNMap, "native-nmap", false, "Use natively-installed nmap in nmap scripts, rather than a docker image")
+	flag.StringVar(&nMapDockerRef, "nmap-docker-ref", "", "Override the docker image used for nmap")
+	flag.StringVar(&extraNMapArgs, "nmap-args", "", "Extra arguments to be provided to nmap")
+	// output options
+	var outputDir string
+	var printToStdOut bool
+	flag.BoolVar(&printToStdOut, "print-to-stdout", false, "Print report results to stdout")
 	flag.StringVar(&outputDir, "output", "output", "Specify a directory for output")
 	flag.Parse()
 
@@ -287,6 +306,16 @@ func main() {
 	err = writeCSVReport(report, outputDir+"/report.csv")
 	if err != nil {
 		panic(err)
+	}
+	if !skipNMap {
+		err = nmap.WriteScripts(outputDir, report, nmap.ScriptOptions{
+			UseNative: nativeNMap,
+			DockerRef: nMapDockerRef,
+			ExtraArgs: extraNMapArgs,
+		})
+		if err != nil {
+			panic(err)
+		}
 	}
 	log.Infof("Reports written to directory %v", outputDir)
 	shutdownPostgres()

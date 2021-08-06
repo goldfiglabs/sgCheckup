@@ -58,6 +58,7 @@ func (externalGroups *ExternalSecurityGroups) Scan(value interface{}) error {
 type securityGroupRow struct {
 	arn                  string
 	groupName            string
+	groupID              string
 	ips                  []string
 	inUse                bool
 	isDefault            bool
@@ -133,14 +134,16 @@ func (r *securityGroupRow) notes(unsafePorts *multirange.MultiRange) []string {
 }
 
 type Row struct {
-	Arn       string
-	Url       string
-	Name      string
-	Status    string
-	PublicIps []string
-	InUse     bool
-	IsDefault bool
-	Notes     []string
+	Arn         string
+	Url         string
+	Name        string
+	GroupID     string
+	Status      string
+	PublicIps   []string
+	InUse       bool
+	IsDefault   bool
+	Notes       []string
+	UnsafePorts *multirange.MultiRange
 }
 
 // Metadata includes information about the report, such as when the data was
@@ -309,14 +312,16 @@ func analyzeSecurityGroupResults(results []securityGroupRow, safePorts []int) ([
 			}
 		}
 		reportRows = append(reportRows, Row{
-			Arn:       row.arn,
-			Url:       consoleUrl(row.arn),
-			Name:      row.groupName,
-			Status:    status,
-			PublicIps: row.ips,
-			InUse:     row.inUse,
-			IsDefault: row.isDefault,
-			Notes:     row.notes(unsafePorts),
+			Arn:         row.arn,
+			Url:         consoleUrl(row.arn),
+			Name:        row.groupName,
+			GroupID:     row.groupID,
+			Status:      status,
+			PublicIps:   row.ips,
+			InUse:       row.inUse,
+			IsDefault:   row.isDefault,
+			Notes:       row.notes(unsafePorts),
+			UnsafePorts: unsafePorts,
 		})
 	}
 	return reportRows, nil
@@ -347,7 +352,7 @@ func runSecurityGroupQuery(db *sql.DB) ([]securityGroupRow, error) {
 	results := make([]securityGroupRow, 0)
 	for rows.Next() {
 		row := securityGroupRow{}
-		err = rows.Scan(&row.arn, &row.groupName, pq.Array(&row.ips), &row.inUse, &row.isDefault,
+		err = rows.Scan(&row.arn, &row.groupName, &row.groupID, pq.Array(&row.ips), &row.inUse, &row.isDefault,
 			pq.Array(&row.portRanges),
 			&row.isLargePublicBlock, &row.largeRangeCount, &row.isRestricted, &row.internalOnly, &row.pairedSecurityGroups, &row.externalGroups)
 		if err != nil {

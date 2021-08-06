@@ -120,6 +120,7 @@ WITH ippermissions AS (
 SELECT
 	SG.uri AS arn,
 	SG.groupname,
+	SG.groupid,
 	COALESCE(P.ips, '{}') AS ips,
 	Attrs.in_use,
 	Attrs.is_default,
