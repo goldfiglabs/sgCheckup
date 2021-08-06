@@ -126,7 +126,7 @@ func writeHTMLReport(report *report.Report, outputFilename string) error {
 			return strings.Join(ips, ", ") + " (" + strconv.Itoa(len(ips)) + ")"
 		},
 		"humanize": func(t time.Time) string {
-			return t.Format(time.RFC1123)
+			return t.Local().Format("2006-01-02 15:04:05")
 		},
 		"portList": func(intPorts []int) string {
 			if len(intPorts) == 0 {

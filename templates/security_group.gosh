@@ -1,6 +1,6 @@
 set -e
 
-# -A os and version scanning
 # -sT look for connect success
-# -T3 timing 3 out of 5
-{{ .Bin }} -A -sT -T3 {{ .Ports }} {{ .Targets }} {{ .ExtraArgs }}
+# -sV, --version-all look for versions of services
+# -T4
+{{ .Bin }} -sT -sV --version-all -T4 {{ .Ports }} {{ .Targets }} {{ .ExtraArgs }}

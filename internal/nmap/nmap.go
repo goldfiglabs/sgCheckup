@@ -6,6 +6,8 @@ import (
 	"os"
 	"strings"
 
+	log "github.com/sirupsen/logrus"
+
 	"github.com/markbates/pkger"
 	"github.com/pkg/errors"
 	"goldfiglabs.com/sgcheckup/internal/report"
@@ -18,7 +20,7 @@ type templateData struct {
 	ExtraArgs string
 }
 
-const defaultNMapDockerRef = "broadinstitute/nmap"
+const defaultNMapDockerRef = "jefftadashi/nmap"
 
 type ScriptOptions struct {
 	UseNative bool
@@ -130,6 +132,8 @@ func WriteScripts(outputDir string, report *report.Report, opts ScriptOptions) e
 		if err != nil {
 			return err
 		}
+	} else {
+		log.Info("Skipping nmap scripts, no public IPs with unsafe ports open found")
 	}
 	return nil
 }
