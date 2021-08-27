@@ -87,6 +87,7 @@ type groupScanTemplateData struct {
 	OutputFile string
 	Ports      string
 	Targets    string
+	Speed      string
 }
 
 func writeGroupScans(outputDir string, report *report.Report) (bool, error) {
@@ -144,11 +145,16 @@ func writeScanGroup(t *template.Template, filename string, row *report.Row) erro
 	if err != nil {
 		return errors.Wrapf(err, "Failed to chmod file %v", filename)
 	}
+	speed := "2"
+	if row.UnsafePorts.Size() * len(row.PublicIps) > 20 {
+		speed = "4"
+	}
 	t.Execute(outputFile, &groupScanTemplateData{
 		Bin:        "nmap",
 		OutputFile: "/opt/sgCheckup/results/" + row.GroupID + ".xml",
 		Targets:    strings.Join(row.PublicIps, " "),
 		Ports:      "-p T:" + row.UnsafePorts.Humanize(),
+		Speed:      speed,
 	})
 	if err != nil {
 		return errors.Wrapf(err, "Failed to execute template for %v", filename)

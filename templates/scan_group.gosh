@@ -5,4 +5,4 @@ set -e
 # -sT look for connect success
 # -sV, --version-all look for versions of services
 # -T2 relatively slow
-{{ .Bin }} -oX {{ .OutputFile }} -sT -sV --version-all -T2 {{ .Ports }} {{ .Targets }}
+{{ .Bin }} -oX {{ .OutputFile }} -Pn -sT -sV --version-light -T{{ .Speed }} {{ .Ports }} {{ .Targets }}
