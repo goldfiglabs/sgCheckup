@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <title>sgCheckup - By Gold Fig Labs</title>
+    <style>
+      body {
+        font-family: sans-serif;
+      }
+
+      .report {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+      }
+
+      .report table {
+        font-size: 14px;
+        border-spacing: 0px;
+        margin: auto;
+      }
+
+      .report td,
+      .report th {
+        padding: 4px 16px;
+        text-align: center;
+      }
+
+      .report th {
+        font-style: italic;
+        font-weight: bold;
+      }
+
+      .report tr:nth-child(even) {
+        background-color: #f2f2f2;
+      }
+
+      .report td.identifier {
+        text-align: left;
+      }
+
+      .two_columns {
+        display: flex;
+        flex-direction: row;
+        justify-content: space-around;
+        width: 100%;
+        max-width: 900px;
+      }
+
+      .two_columns section {
+        padding-left: 8px;
+        padding-right: 8px;
+        padding-top: 0px;
+        max-width: 50%;
+      }
+
+      .metadata { font-weight: bold; }
+    </style>
+  </head>
+  <body>
+    <main class="report">
+      <h1>sgCheckup - IP Scan Results</h1>
+      <div class="two_columns">
+        <section>
+          <p>
+            Account snapshot:
+            <span class="metadata">{{humanize .Metadata.Imported}}</span>
+          </p>
+          <p>
+            Report generated:
+            <span class="metadata">{{humanize .Metadata.Generated}}</span>
+          </p>
+        </section>
+        <section>
+          <p>
+            Organization:
+            <span class="metadata">{{.Metadata.Organization}}</span>
+          </p>
+          <p>Account ID: <span class="metadata">{{.Metadata.Account}}</span></p>
+        </section>
+      </div>
+      <table>
+        <thead>
+          <tr>
+            <th>#</th>
+            <th>IP Address</th>
+            <th>Port</th>
+            <th>Service</th>
+            <th>Security Group(s)</th>
+          </tr>
+        </thead>
+        <tbody>
+          {{range $i, $row := .Ports}}
+          <tr {{ if $row.First }}id="{{ $row.IP }}"{{ end }}>
+            <td>{{ inc $i }}</td>
+            <td>{{ if $row.First }}{{ $row.IP }}{{ end }}</td>
+            <td>{{ $row.Port }}</td>
+            <td>{{ $row.Service }}</td>
+            <td>
+            {{ range $j, $group := $row.SGDisplay.Groups }}
+            <a href="./index.html#{{ $group.GroupId }}">{{ $group.Name }}</a>
+            {{ if not $group.Last }}, {{ end }}
+            {{ end }}
+            </td>
+          </tr>
+          {{end}}
+        </tbody>
+      </table>
+    </main>
+  </body>
+</html>

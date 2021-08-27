@@ -8,6 +8,7 @@ import (
 	"html/template"
 	"io/ioutil"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -72,9 +73,12 @@ func writeCSVReport(rpReport *report.Report, outputFilename string) error {
 	defer outputFile.Close()
 	writer := csv.NewWriter(outputFile)
 	defer writer.Flush()
-	writer.Write([]string{"ARN", "Name", "Status", "Public Ips", "In Use", "Is Default", "Notes"})
+	err = writer.Write([]string{"ARN", "Name", "Status", "Public Ips", "In Use", "Is Default", "Notes"})
+	if err != nil {
+		return errors.Wrapf(err, "Failed to write headers to %v", outputFilename)
+	}
 	for _, row := range rpReport.Rows {
-		writer.Write([]string{
+		err = writer.Write([]string{
 			row.Arn,
 			row.Name,
 			row.Status,
@@ -83,15 +87,185 @@ func writeCSVReport(rpReport *report.Report, outputFilename string) error {
 			strconv.FormatBool(row.IsDefault),
 			strings.Join(row.Notes, ", "),
 		})
+		if err != nil {
+			return errors.Wrapf(err, "Failed to write row to %v", outputFilename)
+		}
+	}
+	return nil
+}
+
+func writeNMapCSVReport(scanResults nmap.IpScanResults, outputFilename string) error {
+	outputFile, err := os.Create(outputFilename)
+	if err != nil {
+		return errors.Wrapf(err, "Failed to create output file %v", outputFilename)
+	}
+	defer outputFile.Close()
+	writer := csv.NewWriter(outputFile)
+	defer writer.Flush()
+	err = writer.Write([]string{"IP", "Port", "Service", "Security Group(s)"})
+	if err != nil {
+		return errors.Wrapf(err, "Failed to write headers to %v", outputFilename)
+	}
+	for ipAddr, ports := range scanResults {
+		for port, portScan := range ports {
+			err = writer.Write([]string{
+				ipAddr,
+				strconv.Itoa(int(port)),
+				portScan.Service.Display(),
+				strings.Join(portScan.SecurityGroups, ", "),
+			})
+			if err != nil {
+				return errors.Wrapf(err, "Failed writing row to %v", outputFilename)
+			}
+		}
+	}
+	return nil
+}
+
+type nmapTemplateData struct {
+	Metadata *report.Metadata
+	Ports    []portRow
+}
+
+type Group struct {
+	GroupId string
+	Name    string
+	Last    bool
+}
+
+type SGDisplay struct {
+	Len    int
+	Groups []Group
+}
+
+type portRow struct {
+	First     bool
+	IP        string
+	Port      uint16
+	Service   string
+	SGDisplay SGDisplay
+}
+
+func toSGDisplay(rows []report.Row, sgIds []string) SGDisplay {
+	groups := []Group{}
+	for i, sgId := range sgIds {
+		for _, row := range rows {
+			if row.GroupID == sgId {
+				groups = append(groups, Group{
+					GroupId: sgId,
+					Name:    row.Name,
+					Last:    i == len(sgIds)-1,
+				})
+				break
+			}
+		}
+	}
+	return SGDisplay{
+		Len:    len(sgIds),
+		Groups: groups,
+	}
+}
+
+func toPortRows(report *report.Report, sr nmap.IpScanResults) []portRow {
+	rows := []portRow{}
+	for ipAddr, portMap := range sr {
+		ipPorts := []portRow{}
+		for port, scanResult := range portMap {
+			ipPorts = append(ipPorts, portRow{
+				First:     false,
+				IP:        ipAddr,
+				Port:      port,
+				Service:   scanResult.Service.Display(),
+				SGDisplay: toSGDisplay(report.Rows, scanResult.SecurityGroups),
+			})
+		}
+		sort.Slice(ipPorts[:], func(i, j int) bool {
+			return ipPorts[i].Port < ipPorts[j].Port
+		})
+		ipPorts[0].First = true
+		rows = append(rows, ipPorts...)
+	}
+	return rows
+}
+
+func writeNMapReport(report *report.Report, outputFilename string, scanResults nmap.IpScanResults) error {
+	filename := "/templates/nmap_scan.html"
+	f, err := pkger.Open(filename)
+	if err != nil {
+		return errors.Wrap(err, "Failed to load nmap html template")
+	}
+	defer f.Close()
+	bytes, err := ioutil.ReadAll(f)
+	if err != nil {
+		return errors.Wrap(err, "Failed to read nmap html template")
+	}
+	t := template.New("sgCheckup-nmap")
+	t.Funcs(template.FuncMap{
+		"humanize": func(t time.Time) string {
+			return t.Local().Format("2006-01-02 15:04:05")
+		},
+		"inc": func(i int) int {
+			return i + 1
+		},
+	})
+	t, err = t.Parse(string(bytes))
+	if err != nil {
+		return errors.Wrap(err, "Failed to parse template")
+	}
+	outputFile, err := os.Create(outputFilename)
+	if err != nil {
+		return errors.Wrapf(err, "Failed to create output file %v", outputFilename)
+	}
+	defer outputFile.Close()
+	err = t.Execute(outputFile, &nmapTemplateData{
+		Metadata: report.Metadata,
+		Ports:    toPortRows(report, scanResults),
+	})
+	if err != nil {
+		return errors.Wrap(err, "Failed to run nmap html template")
 	}
 	return nil
 }
 
 type templateData struct {
-	Report *report.Report
+	Metadata    report.Metadata
+	Rows        []templateRow
+	NMapSkipped bool
 }
 
-func writeHTMLReport(report *report.Report, outputFilename string) error {
+type templateRow struct {
+	report.Row
+	Ips ipList
+}
+
+type ipList struct {
+	Len      int
+	Subset   []string
+	Overflow bool
+}
+
+func makeTemplateRows(reportRows []report.Row) []templateRow {
+	rows := []templateRow{}
+	for _, reportRow := range reportRows {
+		numIps := len(reportRow.PublicIps)
+		cap := numIps
+		if cap >= 8 {
+			cap = 8
+		}
+		tr := templateRow{
+			reportRow,
+			ipList{
+				Len:      numIps,
+				Subset:   reportRow.PublicIps[:cap],
+				Overflow: numIps > 8,
+			},
+		}
+		rows = append(rows, tr)
+	}
+	return rows
+}
+
+func writeHTMLReport(report *report.Report, outputFilename string, nmapSkipped bool) error {
 	filename := "/templates/security_groups.gohtml"
 	f, err := pkger.Open(filename)
 	if err != nil {
@@ -148,7 +322,11 @@ func writeHTMLReport(report *report.Report, outputFilename string) error {
 		return errors.Wrapf(err, "Failed to create output file %v", outputFilename)
 	}
 	defer outputFile.Close()
-	err = t.Execute(outputFile, &templateData{Report: report})
+	err = t.Execute(outputFile, &templateData{
+		Metadata:    *report.Metadata,
+		Rows:        makeTemplateRows(report.Rows),
+		NMapSkipped: nmapSkipped,
+	})
 	if err != nil {
 		return errors.Wrap(err, "Failed to run html template")
 	}
@@ -299,23 +477,32 @@ func main() {
 	if printToStdOut {
 		printReportRows(report)
 	}
-	err = writeHTMLReport(report, outputDir+"/index.html")
+	if !skipNMap {
+		log.Info("Running nmap scan")
+		_, err = nmap.RunScan(ds, outputDir, report)
+		if err != nil {
+			panic(err)
+		}
+		scanResults, err := nmap.ReadScanResults(outputDir + "/nmap/results")
+		if err != nil {
+			panic(err)
+		}
+		err = writeNMapReport(report, outputDir+"/nmap.html", scanResults)
+		if err != nil {
+			panic(err)
+		}
+		err = writeNMapCSVReport(scanResults, outputDir+"/nmap.csv")
+		if err != nil {
+			panic(err)
+		}
+	}
+	err = writeHTMLReport(report, outputDir+"/index.html", skipNMap)
 	if err != nil {
 		panic(err)
 	}
 	err = writeCSVReport(report, outputDir+"/report.csv")
 	if err != nil {
 		panic(err)
-	}
-	if !skipNMap {
-		err = nmap.WriteScripts(outputDir, report, nmap.ScriptOptions{
-			UseNative: nativeNMap,
-			DockerRef: nMapDockerRef,
-			ExtraArgs: extraNMapArgs,
-		})
-		if err != nil {
-			panic(err)
-		}
 	}
 	log.Infof("Reports written to directory %v", outputDir)
 	shutdownPostgres()

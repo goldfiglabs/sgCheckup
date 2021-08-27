@@ -82,20 +82,16 @@
         <section>
           <p>
             Security Groups snapshotted at:
-            <span class="metadata">{{humanize .Report.Metadata.Imported}}</span>
+            <span class="metadata">{{humanize .Metadata.Imported}}</span>
           </p>
           <p>
             Report generated at:
-            <span class="metadata">{{humanize .Report.Metadata.Generated}}</span>
+            <span class="metadata">{{humanize .Metadata.Generated}}</span>
           </p>
         </section>
         <section>
-          <!--p>
-            Organization:
-            <span class="metadata">{{.Report.Metadata.Organization}}</span>
-          </p-->
-          <p>Account ID: <span class="metadata">{{.Report.Metadata.Account}}</span></p>
-          <p>Safe Ports Assumed: <span class="metadata">{{portList .Report.Metadata.SafePorts}}</span></p>
+          <p>Account ID: <span class="metadata">{{.Metadata.Account}}</span></p>
+          <p>Safe Ports Assumed: <span class="metadata">{{portList .Metadata.SafePorts}}</span></p>
         </section>
       </div>
       <table>
@@ -111,14 +107,30 @@
           </tr>
         </thead>
         <tbody>
-          {{range $index, $row := .Report.Rows}}
+          {{ $nmapSkipped := .NMapSkipped }}
+          {{range $index, $row := .Rows}}
           <tr>
             <td>{{inc $index}}</td>
             <td class="identifier"><a href="{{$row.Url}}" target="_blank" rel="nofollow">{{$row.Name}}</a></td>
             <td class="{{$row.Status}}">{{$row.Status}}</td>
             <td>{{yn $row.InUse}}</td>
             <td>{{yn $row.IsDefault}}</td>
-            <td>{{ipList $row.PublicIps}}</td>
+            <td>
+              {{ if eq $row.Ips.Len 0 }}
+              -
+              {{ else }}
+              {{ range $i, $ip := $row.Ips.Subset }}
+                {{ if $nmapSkipped }}
+                {{ $ip }}
+                {{ else }}
+                <a href="./nmap.html#{{ $ip }}">{{ $ip }}</a>
+                {{ end }}
+                {{ if ne (inc $i) $row.Ips.Len }}, 
+                {{ end }}
+              {{ end }}
+              {{ if $row.Ips.Overflow }}...{{ end }}
+              {{ end }}
+            </td>
             <td>{{notes $row.Notes}}</td>
           </tr>
           {{end}}
