@@ -1,6 +1,0 @@
-set -e
-
-# -sT look for connect success
-# -sV, --version-all look for versions of services
-# -T2 relatively slow
-{{ .Bin }} -sT -sV --version-all -T2 {{ .Ports }} {{ .Targets }} {{ .ExtraArgs }}
