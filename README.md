@@ -1,6 +1,6 @@
 # sgCheckup - Check your Security Groups for Unexpected Open Ports & Generate nmap Output
 
-![sgcheckup](https://user-images.githubusercontent.com/291215/131537612-1fa6f8fc-3edc-4710-968c-445ca5433d0e.png)
+![sgcheckup copy](https://user-images.githubusercontent.com/291215/131573778-34207ba3-35a1-4af4-b3a6-39e32cb806b0.png)
 
 `sgCheckup` is a tool to scan your AWS Security Groups for a combination of open ports and attached Network Interfaces. The goal is to find anything listening on a port that you wouldn't consider safe. In addition to generating reports for security groups, `sgCheckup` can generate and run `nmap` to get specifics.
 
