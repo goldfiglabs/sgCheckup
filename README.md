@@ -55,7 +55,7 @@ sgCheckup uses [goldfiglabs/introspector](https://github.com/goldfiglabs/introsp
 
 1. 2 HTML and CSV reports are provided: one each organized by Security Group, and one each organized by IP/Port combination.
 
-1. By default, sgCheckup considers ports 22, 80, and 443 to be open intentionally. You can use the flag `-safePorts <comma-separated port list>` to override this behavior according to your own policies.
+1. By default, sgCheckup considers ports 22, 80, and 443 to be open intentionally. You can use the flag `-safePorts <comma-separated port list>` to override this behavior according to your own policies. Use `--safe-ports ""` to mark all ports unsafe.
 
 1. You can skip the nmap phase with `-skip-nmap`. You will still get the report focused on Security Groups, but not the report based on open IP/Port combinations.
 
