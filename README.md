@@ -16,22 +16,25 @@ Security Groups are an important line of defense for your infrastructure, but as
 
 ## Installation Options
 
-1. Download the latest [release](https://github.com/goldfiglabs/sgCheckup/releases)
+1. Download the latest [release](https://github.com/goldfiglabs/sgCheckup/releases):
 
-   Linux:
-
+Linux:
+```
     curl -Lo sgCheckup https://github.com/goldfiglabs/sgCheckup/releases/latest/download/sgCheckup_linux
     chmod a+x ./sgCheckup
+```
 
-   OSX x86:
-
+OSX x86:
+```
     curl -Lo sgCheckup https://github.com/goldfiglabs/sgCheckup/releases/latest/download/sgCheckup_darwin_amd64
     chmod a+x ./sgCheckup
-
-   OSX M1/arm:
-
+```
+   
+OSX M1/arm:
+```
     curl -Lo sgCheckup https://github.com/goldfiglabs/sgCheckup/releases/latest/download/sgCheckup_darwin_arm64
     chmod a+x ./sgCheckup
+```
 
 2. Run from source:
     ```
