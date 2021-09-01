@@ -49,6 +49,10 @@ Run `./sgCheckup` and view the reports generated in `output/`.
 
 <img width="1217" alt="Screen Shot 2021-08-31 at 3 08 35 PM" src="https://user-images.githubusercontent.com/291215/131582460-4a581540-2f11-4c96-af54-a1e39961e69d.png">
 
+`nmap` results are in `output/nmap/` with a summary cross-referencing security groups found in nmap.html:
+
+<img width="907" alt="Screen Shot 2021-09-01 at 1 54 06 PM" src="https://user-images.githubusercontent.com/291215/131743859-51d35c37-694a-447d-9b59-61bc3dc4131d.png">
+
 ## Overview
 
 sgCheckup uses [goldfiglabs/introspector](https://github.com/goldfiglabs/introspector) to snapshot the Security Groups and Network Interfaces from your AWS Account into a Postgres database. sgCheckup then runs SQL queries to look for Security Groups with open ports and attached Network Interfaces. This list is then used to configure running `nmap` against the targeted list of IPs and ports. The output of nmap is used to determine if a) anything is listening and b) what software is listening on open ports.
