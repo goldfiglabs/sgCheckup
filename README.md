@@ -6,7 +6,7 @@
 
 ## Why?
 
-Security Groups are an important line of defense for your infrastructure, but as you make changes, it's easy to forget to revert some quick fix that was made to get something working. Having a view into what ports are open and what's listening can help you prioritize locking down access. 
+Security Groups are an important line of defense for your infrastructure, but as you make changes, it's easy to forget to revert some quick fix that was made to get something working. Having a view into what ports are open and what's listening can help you prioritize locking down access. Using `nmap` to pinpoint specifics as well as fingerprint the open ports further aides with context in locking down security groups.
 
 ## Pre-requisites
 
